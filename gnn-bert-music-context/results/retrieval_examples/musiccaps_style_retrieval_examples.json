@@ -1,0 +1,222 @@
+{
+  "retrieval_metrics": {
+    "audio2text_R@1": 0.26666666666666666,
+    "text2audio_R@1": 0.23333333333333334,
+    "audio2text_R@5": 1.0,
+    "text2audio_R@5": 1.0,
+    "audio2text_R@10": 1.0,
+    "text2audio_R@10": 1.0
+  },
+  "examples": [
+    {
+      "query_caption": "country track featuring ambient, beat, classical, electronic, guitar, piano",
+      "ground_truth_track": "synth_0114",
+      "top3_matches": [
+        {
+          "track_id": "synth_0026",
+          "text": "country track featuring ambient, beat, classical, electronic, fast, guitar, piano",
+          "similarity": 0.7167114019393921
+        },
+        {
+          "track_id": "synth_0154",
+          "text": "country track featuring beat, classical, electronic, guitar, piano",
+          "similarity": 0.6975269913673401
+        },
+        {
+          "track_id": "synth_0050",
+          "text": "country track featuring beat, classical, electronic, guitar, piano",
+          "similarity": 0.6894049644470215
+        }
+      ]
+    },
+    {
+      "query_caption": "blues track featuring ambient, classical, fast, guitar, strings, techno",
+      "ground_truth_track": "synth_0056",
+      "top3_matches": [
+        {
+          "track_id": "synth_0008",
+          "text": "blues track featuring ambient, classical, drums, guitar, piano, strings, techno",
+          "similarity": 0.6194711923599243
+        },
+        {
+          "track_id": "synth_0056",
+          "text": "blues track featuring ambient, classical, fast, guitar, strings, techno",
+          "similarity": 0.5941885709762573
+        },
+        {
+          "track_id": "synth_0062",
+          "text": "metal track featuring beat, drums, electronic, fast, slow, strings",
+          "similarity": 0.1617843508720398
+        }
+      ]
+    },
+    {
+      "query_caption": "disco track featuring ambient, beat, electronic, fast, guitar, techno",
+      "ground_truth_track": "synth_0107",
+      "top3_matches": [
+        {
+          "track_id": "synth_0139",
+          "text": "disco track featuring ambient, beat, fast, guitar, piano, techno",
+          "similarity": 0.6315808296203613
+        },
+        {
+          "track_id": "synth_0107",
+          "text": "disco track featuring ambient, beat, electronic, fast, guitar, techno",
+          "similarity": 0.6207274794578552
+        },
+        {
+          "track_id": "synth_0035",
+          "text": "disco track featuring ambient, beat, electronic, fast, guitar, rock, techno",
+          "similarity": 0.6110502481460571
+        }
+      ]
+    },
+    {
+      "query_caption": "pop track featuring beat, classical, drums, electronic, guitar, piano, techno",
+      "ground_truth_track": "synth_0191",
+      "top3_matches": [
+        {
+          "track_id": "synth_0191",
+          "text": "pop track featuring beat, classical, drums, electronic, guitar, piano, techno",
+          "similarity": 0.7111080884933472
+        },
+        {
+          "track_id": "synth_0023",
+          "text": "pop track featuring beat, classical, drums, electronic, piano, techno",
+          "similarity": 0.6937931776046753
+        },
+        {
+          "track_id": "synth_0151",
+          "text": "pop track featuring classical, drums, electronic, piano, techno",
+          "similarity": 0.6869375109672546
+        }
+      ]
+    },
+    {
+      "query_caption": "metal track featuring beat, drums, electronic, piano, slow, strings",
+      "ground_truth_track": "synth_0166",
+      "top3_matches": [
+        {
+          "track_id": "synth_0166",
+          "text": "metal track featuring beat, drums, electronic, piano, slow, strings",
+          "similarity": 0.5805896520614624
+        },
+        {
+          "track_id": "synth_0070",
+          "text": "metal track featuring beat, drums, electronic, piano, slow, strings",
+          "similarity": 0.5757952928543091
+        },
+        {
+          "track_id": "synth_0022",
+          "text": "metal track featuring beat, drums, electronic, fast, slow, strings",
+          "similarity": 0.562170684337616
+        }
+      ]
+    },
+    {
+      "query_caption": "country track featuring beat, classical, electronic, guitar, piano",
+      "ground_truth_track": "synth_0050",
+      "top3_matches": [
+        {
+          "track_id": "synth_0026",
+          "text": "country track featuring ambient, beat, classical, electronic, fast, guitar, piano",
+          "similarity": 0.7266337871551514
+        },
+        {
+          "track_id": "synth_0154",
+          "text": "country track featuring beat, classical, electronic, guitar, piano",
+          "similarity": 0.714325487613678
+        },
+        {
+          "track_id": "synth_0050",
+          "text": "country track featuring beat, classical, electronic, guitar, piano",
+          "similarity": 0.7104333639144897
+        }
+      ]
+    },
+    {
+      "query_caption": "pop track featuring classical, drums, electronic, piano, rock, techno",
+      "ground_truth_track": "synth_0143",
+      "top3_matches": [
+        {
+          "track_id": "synth_0055",
+          "text": "pop track featuring ambient, classical, drums, electronic, piano, techno",
+          "similarity": 0.7717039585113525
+        },
+        {
+          "track_id": "synth_0023",
+          "text": "pop track featuring beat, classical, drums, electronic, piano, techno",
+          "similarity": 0.7397449016571045
+        },
+        {
+          "track_id": "synth_0151",
+          "text": "pop track featuring classical, drums, electronic, piano, techno",
+          "similarity": 0.7395973205566406
+        }
+      ]
+    },
+    {
+      "query_caption": "jazz track featuring beat, classical, guitar, piano, rock, slow, strings",
+      "ground_truth_track": "synth_0197",
+      "top3_matches": [
+        {
+          "track_id": "synth_0189",
+          "text": "jazz track featuring ambient, classical, guitar, piano, rock, slow, strings",
+          "similarity": 0.5904772877693176
+        },
+        {
+          "track_id": "synth_0173",
+          "text": "jazz track featuring guitar, piano, rock, slow, strings",
+          "similarity": 0.5901257991790771
+        },
+        {
+          "track_id": "synth_0197",
+          "text": "jazz track featuring beat, classical, guitar, piano, rock, slow, strings",
+          "similarity": 0.5768548250198364
+        }
+      ]
+    },
+    {
+      "query_caption": "country track featuring beat, classical, electronic, guitar, piano",
+      "ground_truth_track": "synth_0154",
+      "top3_matches": [
+        {
+          "track_id": "synth_0026",
+          "text": "country track featuring ambient, beat, classical, electronic, fast, guitar, piano",
+          "similarity": 0.7266337871551514
+        },
+        {
+          "track_id": "synth_0154",
+          "text": "country track featuring beat, classical, electronic, guitar, piano",
+          "similarity": 0.714325487613678
+        },
+        {
+          "track_id": "synth_0050",
+          "text": "country track featuring beat, classical, electronic, guitar, piano",
+          "similarity": 0.7104333639144897
+        }
+      ]
+    },
+    {
+      "query_caption": "classical track featuring beat, classical, fast, piano, rock, slow, techno",
+      "ground_truth_track": "synth_0129",
+      "top3_matches": [
+        {
+          "track_id": "synth_0129",
+          "text": "classical track featuring beat, classical, fast, piano, rock, slow, techno",
+          "similarity": 0.6841750144958496
+        },
+        {
+          "track_id": "synth_0057",
+          "text": "classical track featuring ambient, classical, fast, piano, slow, strings, techno",
+          "similarity": 0.6554063558578491
+        },
+        {
+          "track_id": "synth_0173",
+          "text": "jazz track featuring guitar, piano, rock, slow, strings",
+          "similarity": 0.40729978680610657
+        }
+      ]
+    }
+  ]
+}

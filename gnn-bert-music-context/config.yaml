@@ -1,0 +1,52 @@
+seed: 42
+
+data:
+  root: data/processed
+  raw_root: data/raw
+  splits_root: data/splits
+  sample_rate: 22050
+  n_mels: 128
+  n_chroma: 12
+  segment_seconds: 8.0        # segmentation window (5-10s per spec)
+  text_max_length: 256        # BERT tokenizer max length (128-256 per spec)
+  similarity_threshold: 0.85  # tau for segment-similarity edges (cosine on MFCC/chroma)
+
+bert:
+  model_name: distilbert-base-uncased   # or bert-base-uncased
+  freeze_backbone: false
+  hidden_dim: 768
+  num_tags: 50                # top-50 tags (Task 1 / MagnaTagATune subset)
+
+gnn:
+  type: graphsage              # graphsage | gat
+  in_dim: 128                  # audio segment / chord feature dim
+  hidden_dim: 128
+  out_dim: 128
+  num_layers: 3
+  dropout: 0.2
+  num_genres: 8                # GTZAN default; 16 for FMA-medium
+
+fusion:
+  z_dim: 256
+  num_heads: 4
+  emotion_alpha: 1.0            # weight on valence loss
+  emotion_beta: 1.0             # weight on arousal loss
+
+contrastive:
+  embed_dim: 256
+  temperature: 0.07
+  batch_size: 64
+
+train:
+  epochs: 20
+  batch_size: 32
+  lr: 2.0e-5
+  weight_decay: 0.01
+  optimizer: adamw
+  device: cuda                  # falls back to cpu automatically if unavailable
+  log_every: 10
+  checkpoint_dir: results/checkpoints
+
+eval:
+  metrics: [macro_f1, micro_f1, auc_pr, mae, r2, recall_at_k]
+  k_values: [1, 5, 10]
