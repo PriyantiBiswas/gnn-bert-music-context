@@ -96,3 +96,6 @@ pipeline: resample → mel/chroma → segment/chord graph → BERT tokenize → 
 - Splits are artist-disjoint where artist metadata is available (FMA/MSD).
 - `data/processed/` graph cache uses PyTorch Geometric `Data` objects saved as `.pt`.
 .
+
+
+NEW
