@@ -95,3 +95,4 @@ pipeline: resample → mel/chroma → segment/chord graph → BERT tokenize → 
 - All random seeds are set via `config.yaml: seed`.
 - Splits are artist-disjoint where artist metadata is available (FMA/MSD).
 - `data/processed/` graph cache uses PyTorch Geometric `Data` objects saved as `.pt`.
+.
