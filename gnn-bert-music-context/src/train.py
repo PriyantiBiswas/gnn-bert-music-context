@@ -1,248 +1,461 @@
 """
-train.py
---------
-Unified training entrypoint for Tasks 1-4.
+Unified training entrypoint.
 
-    python train.py --task 1 --synthetic --epochs 20
-    python train.py --task 2 --synthetic --epochs 20
-    python train.py --task 3 --synthetic --epochs 20
-    python train.py --task 4 --synthetic --epochs 20
+    python src/train.py --task 1 --synthetic --epochs 3
+    python src/train.py --task 2 --synthetic --epochs 3
+    python src/train.py --task 3 --synthetic --epochs 3 --fusion cross_attention
+    python src/train.py --task 4 --synthetic --epochs 3
 
-Currently `--synthetic` is the fully wired path (numpy fallback models, so
-this runs with zero external dependencies and zero downloads). The
-`--dataset {fma_small,fma_medium,magnatagatune,musiccaps,gtzan,deam}` path
-calls the corresponding loader in datasets.py — plug in the torch/PyG/
-transformers model classes (already implemented in each module, used
-automatically when those libraries are importable) once real data is cached
-under data/processed/.
+    python src/train.py --task 1 --data-root data/processed --dataset gtzan --epochs 15
+    python src/train.py --task 2 --data-root data/processed --dataset gtzan --epochs 30
+    python src/train.py --task 3 --data-root data/processed --dataset gtzan --ablation --epochs 30
+    python src/train.py --task 4 --data-root data/processed --dataset gtzan --epochs 30
+
+Writes results/metrics.json (merged across runs), results/plots/*.png,
+and (Task 4) results/retrieval_examples/*.json.
 """
-from __future__ import annotations
-
 import argparse
+import os
+import sys
 import json
-import time
-from pathlib import Path
-
 import numpy as np
-import yaml
+import torch
+from torch.utils.data import DataLoader
 
-from datasets import make_synthetic_dataset, train_val_test_split, save_split_ids
-from bert_encoder import SimpleTextEncoder
-from gnn_model import NumpyGraphSAGE
-from fusion_model import NumpyFusionModel
-from contrastive import NumpyDualEncoder, recall_at_k
-from evaluate import macro_micro_f1, auc_pr, mae_r2
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.utils import set_seed, load_config, save_json, device
+from src.datasets import (
+    SyntheticMusicContextDataset, ProcessedMusicContextDataset,
+    collate_graphs, VOCAB_SIZE,
+)
+from src.bert_encoder import MiniTextEncoder, BertTagClassifier, bce_loss, compute_pos_weight
+from src.gnn_model import GraphSAGE, GNNTagClassifier, CNNBaseline
+from src.fusion_model import GNNBertFusion, multitask_loss
+from src.contrastive import DualEncoder, info_nce_loss, retrieval_recall_at_k
+from src.evaluate import tag_metrics, emotion_metrics, random_baseline, pca_mlp_baseline
+
+RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
+PLOTS = os.path.join(RESULTS, "plots")
+RETRIEVAL = os.path.join(RESULTS, "retrieval_examples")
+METRICS_PATH = os.path.join(RESULTS, "metrics.json")
 
 
-def load_config(path: str = "config.yaml") -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
+def _update_metrics(key, value):
+    os.makedirs(RESULTS, exist_ok=True)
+    all_metrics = {}
+    if os.path.exists(METRICS_PATH):
+        with open(METRICS_PATH) as f:
+            all_metrics = json.load(f)
+    all_metrics[key] = value
+    save_json(all_metrics, METRICS_PATH)
 
 
-def set_seed(seed: int):
-    np.random.seed(seed)
+def _plot_curve(history: dict, title: str, fname: str):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    os.makedirs(PLOTS, exist_ok=True)
+    plt.figure(figsize=(5, 4))
+    for k, v in history.items():
+        plt.plot(range(1, len(v) + 1), v, marker="o", label=k)
+    plt.xlabel("epoch")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOTS, fname), dpi=120)
+    plt.close()
 
 
-# ---------------------------------------------------------------------------
-def run_task1(cfg: dict, epochs: int):
-    """BERT-only multi-label tag classifier."""
-    num_tags = min(cfg["bert"]["num_tags"], 12)  # keep smoke test small/fast
-    ds = make_synthetic_dataset(n_samples=cfg.get("n_samples", 120), num_tags=num_tags,
-                                 seed=cfg["seed"])
-    splits = train_val_test_split(ds, seed=cfg["seed"])
-    save_split_ids(splits, "data/splits/task1_split.json")
+def get_loaders(args, cfg):
+    if args.synthetic:
+        train_ds = SyntheticMusicContextDataset(n_samples=args.n_samples, split="train",
+                                                 seed=cfg["seed"], max_length=cfg["text"]["max_length"])
+        val_ds = SyntheticMusicContextDataset(n_samples=max(64, args.n_samples // 4), split="val",
+                                               seed=cfg["seed"], max_length=cfg["text"]["max_length"])
+        test_ds = SyntheticMusicContextDataset(n_samples=max(64, args.n_samples // 4), split="test",
+                                                seed=cfg["seed"], max_length=cfg["text"]["max_length"])
+    else:
+        train_ds = ProcessedMusicContextDataset(args.data_root, args.dataset, "train")
+        val_ds = ProcessedMusicContextDataset(args.data_root, args.dataset, "val")
+        test_ds = ProcessedMusicContextDataset(args.data_root, args.dataset, "test")
 
-    model = SimpleTextEncoder(hidden_dim=128, num_tags=num_tags, seed=cfg["seed"])
-    history = []
-    for epoch in range(1, epochs + 1):
-        texts = [s.text for s in splits["train"]]
-        targets = np.stack([s.tags for s in splits["train"]])
-        loss = model.train_step(texts, targets, lr=0.5)
-        history.append(loss)
-        print(f"[Task1][epoch {epoch}/{epochs}] BCE loss={loss:.4f}")
+    mk = lambda ds, shuffle: DataLoader(ds, batch_size=cfg["training"]["batch_size"],
+                                         shuffle=shuffle, collate_fn=collate_graphs)
+    return train_ds, val_ds, test_ds, mk(train_ds, True), mk(val_ds, False), mk(test_ds, False)
 
-    val_texts = [s.text for s in splits["test"]]
-    val_targets = np.stack([s.tags for s in splits["test"]])
-    probs, _ = model.forward(val_texts)
-    preds = (probs > 0.5).astype(np.float32)
-    metrics = macro_micro_f1(val_targets, preds)
-    metrics["auc_pr"] = auc_pr(val_targets, probs)
-    metrics["loss_curve"] = history
+
+# --------------------------------------------------------------------------- #
+# Task 1: BERT tag classifier
+# --------------------------------------------------------------------------- #
+def run_task1(args, cfg, dev):
+    train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = get_loaders(args, cfg)
+    encoder = MiniTextEncoder(VOCAB_SIZE, cfg["text"]["embed_dim"], cfg["text"]["n_layers"],
+                               cfg["text"]["n_heads"], cfg["text"]["max_length"]).to(dev)
+    model = BertTagClassifier(encoder, train_ds.n_tags).to(dev)
+    opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"])
+    pos_weight = compute_pos_weight(np.stack([s["tags"] for s in train_ds.samples])
+                                     if hasattr(train_ds, "samples")
+                                     else np.stack([train_ds[i]["tags"] for i in range(len(train_ds))]), dev)
+
+    hist = {"train_macro_f1": [], "val_macro_f1": []}
+    for epoch in range(args.epochs):
+        model.train()
+        for batch in train_dl:
+            opt.zero_grad()
+            logits = model(batch["caption_ids"].to(dev))
+            loss = bce_loss(logits, batch["tags"].to(dev), pos_weight)
+            loss.backward()
+            opt.step()
+        tr_m = _eval_task1(model, train_dl, dev)
+        va_m = _eval_task1(model, val_dl, dev)
+        hist["train_macro_f1"].append(tr_m["macro_f1"])
+        hist["val_macro_f1"].append(va_m["macro_f1"])
+        print(f"[Task1][epoch {epoch+1}/{args.epochs}] loss={loss.item():.4f} "
+              f"train_macroF1={tr_m['macro_f1']:.3f} val_macroF1={va_m['macro_f1']:.3f}")
+
+    test_m = _eval_task1(model, test_dl, dev)
+    print("[Task1] TEST:", test_m)
+    _plot_curve(hist, "Task 1: BERT tag classifier — Macro-F1", "task1_f1_curve.png")
+
+    # 5 example predictions
+    model.eval()
+    examples = []
+    with torch.no_grad():
+        batch = next(iter(test_dl))
+        probs = torch.sigmoid(model(batch["caption_ids"].to(dev))).cpu().numpy()
+        from src.datasets import TAG_VOCAB
+        for i in range(min(5, probs.shape[0])):
+            true_tags = [TAG_VOCAB[k] for k in range(len(TAG_VOCAB)) if batch["tags"][i, k] == 1] \
+                if len(TAG_VOCAB) == batch["tags"].shape[1] else \
+                [str(k) for k in range(batch["tags"].shape[1]) if batch["tags"][i, k] == 1]
+            pred_tags = [str(k) for k in np.argsort(-probs[i])[:4]]
+            examples.append({"true_tags": true_tags, "predicted_top4_idx": pred_tags})
+    save_json(examples, os.path.join(RESULTS, "task1_example_predictions.json"))
+
+    y_true_test = np.stack([test_ds.samples[i]["tags"] for i in range(len(test_ds))]) \
+        if hasattr(test_ds, "samples") else np.stack([test_ds[i]["tags"] for i in range(len(test_ds))])
+    baseline = random_baseline(y_true_test)
+    _update_metrics("task1_bert", {"test": test_m, "history": hist})
+    _update_metrics("baseline_B1_random", baseline)
+    return test_m
+
+
+def _eval_task1(model, dl, dev):
+    model.eval()
+    all_true, all_prob = [], []
+    with torch.no_grad():
+        for batch in dl:
+            logits = model(batch["caption_ids"].to(dev))
+            all_prob.append(torch.sigmoid(logits).cpu().numpy())
+            all_true.append(batch["tags"].numpy())
+    return tag_metrics(np.concatenate(all_true), np.concatenate(all_prob))
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: GNN on segment/chord graphs, vs CNN baseline
+# --------------------------------------------------------------------------- #
+def run_task2(args, cfg, dev):
+    train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = get_loaders(args, cfg)
+    sample0 = train_ds.samples[0] if hasattr(train_ds, "samples") else train_ds[0]
+    in_dim = sample0["node_feats"].shape[1]
+    model = GNNTagClassifier(in_dim, train_ds.n_tags, cfg["gnn"]["hidden_dim"],
+                              cfg["gnn"]["n_layers"], cfg["gnn"]["dropout"]).to(dev)
+    opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"])
+
+    cnn = CNNBaseline(sample0["mel"].shape[0], train_ds.n_tags, cfg["gnn"]["hidden_dim"]).to(dev)
+    cnn_opt = torch.optim.Adam(cnn.parameters(), lr=cfg["training"]["lr"])
+
+    all_tags = np.stack([train_ds.samples[i]["tags"] for i in range(len(train_ds))]) \
+        if hasattr(train_ds, "samples") else np.stack([train_ds[i]["tags"] for i in range(len(train_ds))])
+    pos_weight = compute_pos_weight(all_tags, dev)
+
+    hist = {"gnn_val_macro_f1": [], "cnn_val_macro_f1": []}
+    for epoch in range(args.epochs):
+        model.train(); cnn.train()
+        for batch in train_dl:
+            opt.zero_grad()
+            logits, _ = model(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                               batch["batch_idx"].to(dev), batch["n_graphs"])
+            loss = bce_loss(logits, batch["tags"].to(dev), pos_weight)
+            loss.backward(); opt.step()
+
+            cnn_opt.zero_grad()
+            cnn_logits = cnn(batch["mel"].to(dev))
+            cnn_loss = bce_loss(cnn_logits, batch["tags"].to(dev), pos_weight)
+            cnn_loss.backward(); cnn_opt.step()
+
+        gnn_val = _eval_task2_gnn(model, val_dl, dev)
+        cnn_val = _eval_task2_cnn(cnn, val_dl, dev)
+        hist["gnn_val_macro_f1"].append(gnn_val["macro_f1"])
+        hist["cnn_val_macro_f1"].append(cnn_val["macro_f1"])
+        print(f"[Task2][epoch {epoch+1}/{args.epochs}] "
+              f"GNN val_macroF1={gnn_val['macro_f1']:.3f}  CNN(B2) val_macroF1={cnn_val['macro_f1']:.3f}")
+
+    gnn_test = _eval_task2_gnn(model, test_dl, dev)
+    cnn_test = _eval_task2_cnn(cnn, test_dl, dev)
+    print("[Task2] TEST GNN:", gnn_test, " CNN(B2):", cnn_test)
+    _plot_curve(hist, "Task 2: GNN vs CNN baseline — Macro-F1", "task2_gnn_vs_cnn.png")
+    _update_metrics("task2_gnn", {"test": gnn_test, "history": hist})
+    _update_metrics("baseline_B2_cnn", cnn_test)
+    return gnn_test
+
+
+def _eval_task2_gnn(model, dl, dev):
+    model.eval()
+    all_true, all_prob = [], []
+    with torch.no_grad():
+        for batch in dl:
+            logits, _ = model(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                               batch["batch_idx"].to(dev), batch["n_graphs"])
+            all_prob.append(torch.sigmoid(logits).cpu().numpy())
+            all_true.append(batch["tags"].numpy())
+    return tag_metrics(np.concatenate(all_true), np.concatenate(all_prob))
+
+
+def _eval_task2_cnn(model, dl, dev):
+    model.eval()
+    all_true, all_prob = [], []
+    with torch.no_grad():
+        for batch in dl:
+            logits = model(batch["mel"].to(dev))
+            all_prob.append(torch.sigmoid(logits).cpu().numpy())
+            all_true.append(batch["tags"].numpy())
+    return tag_metrics(np.concatenate(all_true), np.concatenate(all_prob))
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: GNN-BERT fusion (+ ablations) and emotion regression
+# --------------------------------------------------------------------------- #
+def run_task3(args, cfg, dev):
+    train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = get_loaders(args, cfg)
+    sample0 = train_ds.samples[0] if hasattr(train_ds, "samples") else train_ds[0]
+    in_dim = sample0["node_feats"].shape[1]
+
+    all_tags = np.stack([train_ds.samples[i]["tags"] for i in range(len(train_ds))]) \
+        if hasattr(train_ds, "samples") else np.stack([train_ds[i]["tags"] for i in range(len(train_ds))])
+
+    modes = ["bert_only", "gnn_only", "concat", "cross_attention"] if args.ablation else [args.fusion]
+    ablation_results = {}
+    final_model, final_mode = None, None
+    for mode in modes:
+        gnn = GraphSAGE(in_dim, cfg["gnn"]["hidden_dim"], cfg["gnn"]["n_layers"], cfg["gnn"]["dropout"])
+        text = MiniTextEncoder(VOCAB_SIZE, cfg["text"]["embed_dim"], cfg["text"]["n_layers"],
+                                cfg["text"]["n_heads"], cfg["text"]["max_length"])
+        model = GNNBertFusion(gnn, text, train_ds.n_tags, fusion_mode=mode).to(dev)
+        # fusion models have more parameters (attention/concat heads on top of
+        # two encoders) so a lower LR trains more stably than the shared default
+        opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"] * 0.5)
+        pos_weight = compute_pos_weight(all_tags, dev)
+
+        hist = {"val_macro_f1": [], "val_mae": []}
+        for epoch in range(args.epochs):
+            model.train()
+            for batch in train_dl:
+                opt.zero_grad()
+                tag_logits, va_pred, _ = model(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                                                batch["batch_idx"].to(dev), batch["n_graphs"],
+                                                batch["caption_ids"].to(dev))
+                va_true = torch.stack([batch["valence"], batch["arousal"]], dim=1).to(dev)
+                loss, _ = multitask_loss(tag_logits, batch["tags"].to(dev), va_pred, va_true,
+                                          pos_weight=pos_weight)
+                loss.backward(); opt.step()
+            val_m = _eval_task3(model, val_dl, dev)
+            hist["val_macro_f1"].append(val_m["macro_f1"])
+            hist["val_mae"].append(val_m["mae"])
+            print(f"[Task3:{mode}][epoch {epoch+1}/{args.epochs}] "
+                  f"val_macroF1={val_m['macro_f1']:.3f} val_MAE={val_m['mae']:.3f}")
+
+        test_m = _eval_task3(model, test_dl, dev)
+        print(f"[Task3:{mode}] TEST:", test_m)
+        ablation_results[mode] = {"test": test_m, "history": hist}
+        if mode == (args.fusion if not args.ablation else "cross_attention"):
+            final_model, final_mode = model, mode
+
+    _plot_curve({m: ablation_results[m]["history"]["val_macro_f1"] for m in ablation_results},
+                "Task 3: fusion ablation — val Macro-F1", "task3_ablation_f1.png")
+    _update_metrics("task3_fusion_ablation", ablation_results)
+
+    if final_model is not None:
+        _tsne_plot(final_model, test_dl, dev, test_ds)
+        _case_studies(final_model, test_dl, dev)
+    return ablation_results
+
+
+def _eval_task3(model, dl, dev):
+    model.eval()
+    all_true, all_prob, va_true_l, va_pred_l = [], [], [], []
+    with torch.no_grad():
+        for batch in dl:
+            tag_logits, va_pred, _ = model(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                                            batch["batch_idx"].to(dev), batch["n_graphs"],
+                                            batch["caption_ids"].to(dev))
+            all_prob.append(torch.sigmoid(tag_logits).cpu().numpy())
+            all_true.append(batch["tags"].numpy())
+            va_true_l.append(torch.stack([batch["valence"], batch["arousal"]], dim=1).numpy())
+            va_pred_l.append(va_pred.cpu().numpy())
+    tm = tag_metrics(np.concatenate(all_true), np.concatenate(all_prob))
+    em = emotion_metrics(np.concatenate(va_true_l), np.concatenate(va_pred_l))
+    return {**tm, **em}
+
+
+def _tsne_plot(model, dl, dev, test_ds):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from sklearn.manifold import TSNE
+    model.eval()
+    zs, concepts = [], []
+    with torch.no_grad():
+        for batch in dl:
+            from src.gnn_model import GraphSAGE
+            h = model.gnn(batch["node_feats"].to(dev), batch["edge_index"].to(dev))
+            g = GraphSAGE.readout(h, batch["batch_idx"].to(dev), batch["n_graphs"])
+            cls, h_text = model.text(batch["caption_ids"].to(dev))
+            if model.fusion_mode == "cross_attention":
+                z, _ = model.fusion(g, h_text)
+            else:
+                z = torch.cat([g, cls], dim=-1)
+            zs.append(z.cpu().numpy())
+    concepts = np.array([int(s.get("concept", 0)) for s in test_ds.samples]) if hasattr(test_ds, "samples") else \
+               np.array([int(test_ds[i].get("concept", 0)) for i in range(len(test_ds))])
+    Z = np.concatenate(zs)
+    n = min(len(Z), len(concepts))
+    Z, concepts = Z[:n], concepts[:n]
+    if n < 4:
+        print(f"[Task3] skipping t-SNE plot — only {n} test samples, too few for a meaningful embedding.")
+        return
+    perplex = max(2, min(30, n // 3, n - 1))
+    Z2 = TSNE(n_components=2, perplexity=perplex, random_state=42, init="pca").fit_transform(Z)
+    plt.figure(figsize=(5, 5))
+    sc = plt.scatter(Z2[:, 0], Z2[:, 1], c=concepts, cmap="tab10", s=18)
+    plt.legend(*sc.legend_elements(), title="concept/genre", loc="best", fontsize=7)
+    plt.title("Task 3: t-SNE of fused embeddings z")
+    plt.tight_layout()
+    os.makedirs(PLOTS, exist_ok=True)
+    plt.savefig(os.path.join(PLOTS, "task3_tsne.png"), dpi=120)
+    plt.close()
+
+
+def _case_studies(model, dl, dev, n=3):
+    from src.datasets import TAG_VOCAB
+    model.eval()
+    batch = next(iter(dl))
+    with torch.no_grad():
+        tag_logits, va_pred, attn = model(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                                           batch["batch_idx"].to(dev), batch["n_graphs"],
+                                           batch["caption_ids"].to(dev))
+    probs = torch.sigmoid(tag_logits).cpu().numpy()
+    cases = []
+    n_tags = probs.shape[1]
+    for i in range(min(n, probs.shape[0])):
+        top_idx = np.argsort(-probs[i])[:3]
+        labels = [TAG_VOCAB[k] if n_tags == len(TAG_VOCAB) else str(k) for k in top_idx]
+        entry = {
+            "predicted_top_tags": labels,
+            "predicted_valence_arousal": va_pred[i].tolist(),
+        }
+        if attn is not None:
+            entry["graph_to_caption_attention_over_tokens"] = attn[i].cpu().numpy().round(3).tolist()
+        cases.append(entry)
+    save_json(cases, os.path.join(RESULTS, "task3_case_studies.json"))
+
+
+# --------------------------------------------------------------------------- #
+# Task 4: contrastive dual-encoder + retrieval
+# --------------------------------------------------------------------------- #
+def run_task4(args, cfg, dev):
+    train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = get_loaders(args, cfg)
+    sample0 = train_ds.samples[0] if hasattr(train_ds, "samples") else train_ds[0]
+    in_dim = sample0["node_feats"].shape[1]
+    gnn = GraphSAGE(in_dim, cfg["gnn"]["hidden_dim"], cfg["gnn"]["n_layers"], cfg["gnn"]["dropout"])
+    text = MiniTextEncoder(VOCAB_SIZE, cfg["text"]["embed_dim"], cfg["text"]["n_layers"],
+                            cfg["text"]["n_heads"], cfg["text"]["max_length"])
+    model = DualEncoder(gnn, text, cfg["contrastive"]["embed_dim"]).to(dev)
+    opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"])
+    temp = cfg["contrastive"]["temperature"]
+
+    hist = {"train_loss": [], "val_R@5_a2c": []}
+    for epoch in range(args.epochs):
+        model.train()
+        epoch_loss = 0.0
+        for batch in train_dl:
+            opt.zero_grad()
+            g_e, t_e = model(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                              batch["batch_idx"].to(dev), batch["n_graphs"], batch["caption_ids"].to(dev))
+            loss = info_nce_loss(g_e, t_e, temp)
+            loss.backward(); opt.step()
+            epoch_loss += loss.item()
+        val_r = _eval_task4(model, val_dl, dev)
+        hist["train_loss"].append(epoch_loss / max(1, len(train_dl)))
+        hist["val_R@5_a2c"].append(val_r.get("audio_to_caption_R@5", 0.0))
+        print(f"[Task4][epoch {epoch+1}/{args.epochs}] loss={hist['train_loss'][-1]:.4f} "
+              f"val R@5(audio->caption)={hist['val_R@5_a2c'][-1]:.3f}")
+
+    test_r = _eval_task4(model, test_dl, dev, save_examples=True)
+    print("[Task4] TEST retrieval:", test_r)
+    _plot_curve({"train_loss": hist["train_loss"]}, "Task 4: contrastive InfoNCE loss", "task4_loss_curve.png")
+    _plot_curve({"val_R@5_a2c": hist["val_R@5_a2c"]}, "Task 4: val Audio->Caption R@5", "task4_recall_curve.png")
+    _update_metrics("task4_contrastive", {"test": test_r, "history": hist})
+    return test_r
+
+
+def _eval_task4(model, dl, dev, save_examples=False):
+    model.eval()
+    g_all, t_all = [], []
+    with torch.no_grad():
+        for batch in dl:
+            g_e, t_e = model(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                              batch["batch_idx"].to(dev), batch["n_graphs"], batch["caption_ids"].to(dev))
+            g_all.append(g_e.cpu()); t_all.append(t_e.cpu())
+    g_all, t_all = torch.cat(g_all), torch.cat(t_all)
+    metrics = retrieval_recall_at_k(g_all, t_all)
+    if save_examples:
+        sims = (g_all @ t_all.t()).numpy()
+        examples = []
+        ds = dl.dataset
+        n = len(ds)
+        for i in range(min(10, n)):
+            top3 = np.argsort(-sims[i])[:3].tolist()
+            s_i = ds.samples[i] if hasattr(ds, "samples") else ds[i]
+            examples.append({
+                "query_track": s_i.get("track_id", str(i)),
+                "top3_retrieved_indices": top3,
+                "correct_in_top3": bool(i in top3),
+            })
+        save_json(examples, os.path.join(RETRIEVAL, "task4_retrieval_examples.json"))
     return metrics
 
 
-def run_task2(cfg: dict, epochs: int):
-    """GNN-only genre classifier on segment graphs."""
-    num_genres = cfg["gnn"]["num_genres"]
-    ds = make_synthetic_dataset(n_samples=cfg.get("n_samples", 120), num_genres=num_genres,
-                                 graph_type="segment", seed=cfg["seed"])
-    splits = train_val_test_split(ds, seed=cfg["seed"])
-    save_split_ids(splits, "data/splits/task2_split.json")
-
-    in_dim = ds[0].graph.x.shape[1]
-    model = NumpyGraphSAGE(in_dim=in_dim, hidden_dim=32, out_dim=32, num_layers=2,
-                            num_classes=num_genres, seed=cfg["seed"])
-    train_targets = np.eye(num_genres, dtype=np.float32)[[s.genre for s in splits["train"]]]
-    history = []
-    for epoch in range(1, epochs + 1):
-        loss = model.train_step([s.graph for s in splits["train"]], train_targets, lr=0.2)
-        history.append(loss)
-        print(f"[Task2][epoch {epoch}/{epochs}] BCE loss={loss:.4f}")
-
-    test_targets = np.eye(num_genres, dtype=np.float32)[[s.genre for s in splits["test"]]]
-    probs = np.stack([model.forward(s.graph)[0] for s in splits["test"]])
-    # single-label genre classification -> argmax (not a 0.5 threshold) for predictions
-    pred_idx = np.argmax(probs, axis=1)
-    preds = np.eye(num_genres, dtype=np.float32)[pred_idx]
-    metrics = macro_micro_f1(test_targets, preds)
-    metrics["accuracy"] = float(np.mean(pred_idx == np.argmax(test_targets, axis=1)))
-    metrics["loss_curve"] = history
-    return metrics
-
-
-def run_task3(cfg: dict, epochs: int):
-    """Cross-attention GNN-BERT fusion + emotion regression."""
-    num_tags = min(cfg["bert"]["num_tags"], 12)
-    ds = make_synthetic_dataset(n_samples=cfg.get("n_samples", 120), num_tags=num_tags,
-                                 graph_type="segment", seed=cfg["seed"])
-    splits = train_val_test_split(ds, seed=cfg["seed"])
-    save_split_ids(splits, "data/splits/task3_split.json")
-
-    g_dim = ds[0].graph.x.shape[1]
-    text_dim = 32
-    z_dim = 24
-    text_encoder = SimpleTextEncoder(hidden_dim=text_dim, num_tags=num_tags, seed=cfg["seed"])
-    model = NumpyFusionModel(g_dim=g_dim, t_dim=text_dim, z_dim=z_dim, num_tags=num_tags,
-                              seed=cfg["seed"])
-
-    def sample_pairs(subset):
-        pairs, tags, emos = [], [], []
-        for s in subset:
-            g = s.graph.x.mean(axis=0)  # simple graph-vector for the fallback fusion model
-            L = 6
-            H_text = np.stack(
-                [text_encoder._hash_embed(tok) for tok in (s.text.split() + [""] * L)[:L]]
-            )
-            pairs.append((g.astype(np.float32), H_text.astype(np.float32)))
-            tags.append(s.tags)
-            emos.append(np.array([s.valence, s.arousal], dtype=np.float32))
-        return pairs, np.stack(tags), np.stack(emos)
-
-    train_pairs, train_tags, train_emos = sample_pairs(splits["train"])
-    history = []
-    for epoch in range(1, epochs + 1):
-        loss = model.train_step(train_pairs, train_tags, train_emos, lr=0.1,
-                                 alpha=cfg["fusion"]["emotion_alpha"],
-                                 beta=cfg["fusion"]["emotion_beta"])
-        history.append(loss)
-        print(f"[Task3][epoch {epoch}/{epochs}] multi-task loss={loss:.4f}")
-
-    test_pairs, test_tags, test_emos = sample_pairs(splits["test"])
-    tag_preds, emo_preds = [], []
-    for g, H_text in test_pairs:
-        probs, emo, _, _ = model.forward(g, H_text)
-        tag_preds.append(probs)
-        emo_preds.append(emo)
-    tag_preds = np.stack(tag_preds)
-    emo_preds = np.stack(emo_preds)
-
-    metrics = macro_micro_f1(test_tags, (tag_preds > 0.5).astype(np.float32))
-    metrics["auc_pr"] = auc_pr(test_tags, tag_preds)
-    metrics["valence"] = mae_r2(test_emos[:, 0], emo_preds[:, 0])
-    metrics["arousal"] = mae_r2(test_emos[:, 1], emo_preds[:, 1])
-    metrics["loss_curve"] = history
-    return metrics
-
-
-def run_task4(cfg: dict, epochs: int):
-    """Contrastive InfoNCE dual-encoder (MusicCaps-style graph<->caption retrieval)."""
-    ds = make_synthetic_dataset(n_samples=cfg.get("n_samples", 80), graph_type="segment",
-                                 seed=cfg["seed"])
-    splits = train_val_test_split(ds, seed=cfg["seed"])
-    save_split_ids(splits, "data/splits/task4_split.json")
-
-    g_dim = ds[0].graph.x.shape[1]
-    t_dim = 32
-    text_encoder = SimpleTextEncoder(hidden_dim=t_dim, num_tags=1, seed=cfg["seed"])
-    model = NumpyDualEncoder(g_dim=g_dim, t_dim=t_dim,
-                              embed_dim=cfg["contrastive"]["embed_dim"] // 4,
-                              seed=cfg["seed"])
-
-    def featurize(subset):
-        G = np.stack([s.graph.x.mean(axis=0) for s in subset]).astype(np.float32)
-        T = text_encoder.encode_text([s.text for s in subset]).astype(np.float32)
-        return G, T
-
-    G_train, T_train = featurize(splits["train"])
-    history = []
-    for epoch in range(1, epochs + 1):
-        loss = model.train_step(G_train, T_train, lr=0.3,
-                                 tau=cfg["contrastive"]["temperature"])
-        history.append(loss)
-        print(f"[Task4][epoch {epoch}/{epochs}] InfoNCE loss={loss:.4f}")
-
-    G_test, T_test = featurize(splits["test"])
-    g_embed, t_embed = model.encode(G_test, T_test)
-    metrics = recall_at_k(g_embed, t_embed, k_values=tuple(cfg["eval"]["k_values"]))
-    metrics["loss_curve"] = history
-    return metrics
-
-
-TASKS = {1: run_task1, 2: run_task2, 3: run_task3, 4: run_task4}
-
-
+# --------------------------------------------------------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="Train GNN-BERT music context models.")
-    parser.add_argument("--task", type=int, required=True, choices=[1, 2, 3, 4])
-    parser.add_argument("--synthetic", action="store_true",
-                         help="Use synthetic data (default/only supported path currently).")
-    parser.add_argument("--dataset", type=str, default=None,
-                         help="Real dataset name (fma_small|fma_medium|magnatagatune|"
-                              "musiccaps|gtzan|deam) — requires data under data/raw/.")
-    parser.add_argument("--config", type=str, default="config.yaml")
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--out", type=str, default="results/metrics.json")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--task", type=int, required=True, choices=[1, 2, 3, 4])
+    p.add_argument("--synthetic", action="store_true", help="use synthetic in-memory dataset")
+    p.add_argument("--data-root", type=str, default="data/processed")
+    p.add_argument("--dataset", type=str, default="gtzan")
+    p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--n-samples", dest="n_samples", type=int, default=480)
+    p.add_argument("--fusion", type=str, default="cross_attention",
+                    choices=["bert_only", "gnn_only", "concat", "cross_attention"])
+    p.add_argument("--ablation", action="store_true", help="Task 3: run all 4 fusion modes")
+    p.add_argument("--config", type=str, default="config.yaml")
+    args = p.parse_args()
 
     cfg = load_config(args.config)
+    if args.epochs is None:
+        args.epochs = cfg["training"]["epochs"]
     set_seed(cfg["seed"])
-    epochs = args.epochs or cfg["train"]["epochs"]
+    dev = device()
+    print(f"[setup] device={dev}  task={args.task}  synthetic={args.synthetic}  epochs={args.epochs}")
 
-    if args.dataset and not args.synthetic:
-        raise NotImplementedError(
-            "Real-dataset training requires torch/torch_geometric/transformers "
-            "and preprocessed data under data/processed/. See datasets.py loaders "
-            "and swap the Numpy* fallback classes in train.py for the torch model "
-            "classes (BertTagClassifier / GNNClassifier / GNNBertFusionModel / "
-            "DualEncoder), which are used automatically when those libraries "
-            "are importable."
-        )
-
-    t0 = time.time()
-    metrics = TASKS[args.task](cfg, epochs)
-    metrics["elapsed_sec"] = round(time.time() - t0, 2)
-
-    def _to_jsonable(obj):
-        if isinstance(obj, dict):
-            return {k: _to_jsonable(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_to_jsonable(v) for v in obj]
-        if isinstance(obj, (np.floating, np.integer)):
-            return obj.item()
-        return obj
-
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    existing = {}
-    if Path(args.out).exists():
-        existing = json.loads(Path(args.out).read_text())
-    existing[f"task{args.task}"] = _to_jsonable(metrics)
-    Path(args.out).write_text(json.dumps(existing, indent=2))
-
-    print(f"\n=== Task {args.task} final metrics ===")
-    for k, v in metrics.items():
-        if k != "loss_curve":
-            print(f"  {k}: {v}")
-    print(f"Saved to {args.out}")
+    if args.task == 1:
+        run_task1(args, cfg, dev)
+    elif args.task == 2:
+        run_task2(args, cfg, dev)
+    elif args.task == 3:
+        run_task3(args, cfg, dev)
+    elif args.task == 4:
+        run_task4(args, cfg, dev)
 
 
 if __name__ == "__main__":
