@@ -1,0 +1,22 @@
+# Core
+torch>=2.1
+numpy
+scikit-learn
+scipy
+matplotlib
+pyyaml
+tqdm
+
+# Audio (Task 2/3 real-data preprocessing)
+librosa
+soundfile
+
+# Real dataset / real-BERT mode (optional, needs internet access to
+# huggingface.co and the dataset hosts — see README "Swapping in real
+# HuggingFace BERT / real datasets"). Not required for --synthetic runs.
+transformers
+torch-geometric
+
+# Notebooks
+jupyter
+ipykernel
