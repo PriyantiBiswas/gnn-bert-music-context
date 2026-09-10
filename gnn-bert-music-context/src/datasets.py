@@ -1,234 +1,237 @@
 """
-datasets.py
------------
-Loaders for the datasets in spec Table 1 (FMA, MagnaTagATune, GTZAN, DEAM,
-MusicCaps, MSD+tagtraum, Lakh MIDI, EmoMusic), plus a synthetic generator so
-every training script (`train.py --synthetic`) is runnable without any
-downloads.
+Dataset loading for the GNN-BERT music context project.
 
-Real-dataset loaders expect files already downloaded into `data/raw/<name>/`
-per the official links in the project spec, and read cached
-graphs/features/labels from `data/processed/` (built via
-`audio_features.py` + `graph_builder.py`). They are written as thin,
-well-documented stubs: fill in the paths for your actual download layout.
+Two modes:
+  1. --synthetic : generates a small, *structured* synthetic corpus so the
+     whole pipeline (BERT tagger, GNN, fusion, contrastive) can be trained
+     and evaluated end-to-end with no downloads. The synthetic data is not
+     random noise: each sample is drawn from one of a handful of latent
+     "concepts" (proxy for genre/mood clusters) that jointly bias the tags,
+     the caption tokens, the graph node features/edge density, and the
+     valence/arousal targets. This gives every model something real to
+     learn, so metrics move off the random baseline like they would on
+     real data.
+  2. real mode (--data-root / --dataset) : loaders that read *already
+     preprocessed* .pt graph files written by src/preprocess_dataset.py
+     under data/processed/<dataset>/{train,val,test}/.
 """
-from __future__ import annotations
-
+import os
 import json
-import random
-from dataclasses import dataclass, field
-from pathlib import Path
-
+import glob
 import numpy as np
+import torch
+from torch.utils.data import Dataset
 
-from audio_features import synthetic_track, segment_windows, segment_embedding
-from graph_builder import (
-    estimate_chord_sequence,
-    build_chord_transition_graph,
-    build_segment_similarity_graph,
-)
+CONCEPT_NAMES = [
+    "melancholic_jazz", "high_energy_electronic", "acoustic_folk",
+    "aggressive_rock", "ambient_chill", "upbeat_pop",
+]
+# Each concept "owns" a small cluster of tags out of a shared 20-tag vocab.
+TAG_VOCAB = [
+    "jazz", "melancholic", "slow_tempo", "piano",            # concept 0
+    "electronic", "high_arousal", "synth", "danceable",      # concept 1
+    "folk", "acoustic", "mellow", "guitar",                  # concept 2
+    "rock", "distorted", "aggressive", "drums",               # concept 3
+    "ambient", "calm", "atmospheric", "low_arousal",          # concept 4
+    "pop", "catchy", "vocal", "bright",                       # concept 5
+]
+CONCEPT_TAG_SLICE = {i: slice(i * 4, i * 4 + 4) for i in range(6)}
+CONCEPT_VA = {  # base (valence, arousal) in [1, 9] per concept, per Table 1 (DEAM range)
+    0: (3.0, 3.5), 1: (6.5, 8.0), 2: (5.5, 4.0),
+    3: (3.5, 8.0), 4: (5.0, 2.5), 5: (7.5, 6.5),
+}
+CONCEPT_WORDS = {
+    0: ["mournful", "brushed", "cymbals", "lounge", "smoky", "minor"],
+    1: ["pulsing", "four-on-the-floor", "sidechain", "rave", "neon", "drop"],
+    2: ["fingerpicked", "campfire", "warm", "unplugged", "wooden", "porch"],
+    3: ["crunchy", "riff", "screamed", "wall-of-sound", "power-chord", "grit"],
+    4: ["floating", "drone", "reverb", "sparse", "night", "hush"],
+    5: ["shiny", "hook", "chorus", "radio-ready", "clap", "sunny"],
+}
+COMMON_WORDS = ["the", "song", "features", "a", "track", "with", "sound", "of", "music"]
 
-TOP_50_MAGNATAGATUNE_TAGS = [
-    "guitar", "classical", "slow", "techno", "strings", "drums", "electronic",
-    "rock", "fast", "piano", "ambient", "beat", "violin", "vocal", "synth",
-    "female", "indian", "opera", "male", "singing", "vocals", "no vocals",
-    "harpsichord", "loud", "quiet", "flute", "woman", "male vocal",
-    "no vocal", "pop", "soft", "sitar", "solo", "man", "classic", "choir",
-    "voice", "new age", "dance", "male voice", "female vocal", "beats",
-    "harp", "cello", "no voice", "weird", "country", "metal", "female voice",
-    "choral", "jazz",
+COMMON_WORDS = ["the", "song", "features", "a", "track", "with", "sound", "of", "music"]
+
+# Extra domain words for real-dataset preprocessing scripts (preprocess_dataset.py
+# for GTZAN, preprocess_deam.py for DEAM). Any word tokenized into a real
+# caption but missing from VOCAB collapses to UNK, silently destroying the
+# text signal (this bit us once already) -- every descriptive/label word
+# those scripts can put into a caption must be listed here.
+EXTRA_DATASET_WORDS = [
+    # GTZAN genre names (kept for Task 4 zero-shot prompts, e.g. "a song about jazz";
+    # NOT used inside GTZAN captions themselves, to avoid trivial label leakage)
+    "blues", "classical", "country", "disco", "hiphop", "jazz", "metal",
+    "pop", "reggae", "rock", "genre",
+    # GTZAN caption descriptive adjectives (see preprocess_dataset.py::GTZAN_GENRE_WORDS)
+    "mournful", "soulful", "slide-guitar", "twelve-bar", "weary", "harmonica",
+    "orchestral", "symphonic", "stately", "ornate", "composed", "refined",
+    "twangy", "storytelling", "rural", "banjo", "heartfelt", "dusty",
+    "groovy", "four-on-the-floor", "glittery", "strings", "dancefloor", "retro",
+    "rhythmic", "sampled", "spoken-word", "urban", "bassy", "looped",
+    "improvised", "syncopated", "smoky", "brassy", "swinging", "intricate",
+    "distorted", "heavy", "aggressive", "screaming", "powerful", "intense",
+    "catchy", "polished", "bright", "radio-ready", "hooky", "upbeat",
+    "offbeat", "laid-back", "island", "skanking", "mellow", "loping",
+    "driving", "electric", "riff-heavy", "energetic", "raw", "anthemic",
+    # DEAM mood-quadrant descriptive adjectives (see preprocess_deam.py::QUADRANT_WORDS)
+    "joyful", "vibrant", "triumphant", "sparkling", "exuberant",
+    "peaceful", "warm", "gentle", "soothing", "serene", "tender",
+    "tense", "frantic", "harsh", "chaotic", "jarring",
+    "melancholic", "somber", "bleak", "hollow",
+    "mood",
 ]
 
-GTZAN_GENRES = [
-    "blues", "classical", "country", "disco", "hiphop", "jazz",
-    "metal", "pop", "reggae", "rock",
-]
+
+def _vocab():
+    words = sorted(set(COMMON_WORDS + EXTRA_DATASET_WORDS +
+                        [w for ws in CONCEPT_WORDS.values() for w in ws]))
+    return {w: i + 4 for i, w in enumerate(words)}  # 0..3 reserved (PAD,CLS,SEP,UNK)
+
+VOCAB = _vocab()
+PAD, CLS, SEP, UNK = 0, 1, 2, 3
+VOCAB_SIZE = len(VOCAB) + 4
 
 
-@dataclass
-class MusicSample:
-    track_id: str
-    text: str                    # tags / caption / lyrics (raw string, joined tags OK)
-    tags: np.ndarray              # multi-hot (K,)
-    graph: object                 # Data / SimpleGraph from graph_builder
-    genre: int | None = None
-    valence: float | None = None
-    arousal: float | None = None
-    extra: dict = field(default_factory=dict)
+def tokenize(words, max_length=32):
+    ids = [CLS] + [VOCAB.get(w, UNK) for w in words][: max_length - 2] + [SEP]
+    ids = ids + [PAD] * (max_length - len(ids))
+    return ids[:max_length]
 
 
-# ---------------------------------------------------------------------------
-# Real-dataset stubs (fill in paths once data is downloaded per Table 1)
-# ---------------------------------------------------------------------------
-def load_fma(root: str = "data/raw/fma_small", split: str = "train") -> list[MusicSample]:
-    """FMA small/medium: genre + tags + metadata. See https://github.com/mdeff/fma"""
-    root = Path(root)
-    meta_path = root / "tracks.csv"
-    if not meta_path.exists():
-        raise FileNotFoundError(
-            f"{meta_path} not found. Download FMA per Table 1 and place under {root}, "
-            f"or run with --synthetic for a smoke test."
-        )
-    raise NotImplementedError(
-        "Populate this loader once FMA is downloaded: parse tracks.csv, "
-        "load cached mel/chroma from data/processed/fma/, build segment graphs "
-        "via graph_builder.build_segment_similarity_graph, and apply the official "
-        "FMA train/val/test split (no artist leakage)."
-    )
+def _make_graph(rng, concept, n_nodes=8, feat_dim=16):
+    """Segment-similarity graph: node features cluster around a concept
+    mean; edges = temporal chain + high-similarity pairs (mimics Section 3
+    'segment graph': temporal adjacency + cosine similarity > tau)."""
+    mean = rng.normal(loc=concept, scale=1.0, size=feat_dim) * 0.5
+    feats = rng.normal(loc=mean, scale=0.6, size=(n_nodes, feat_dim)).astype(np.float32)
+    edges = [(i, i + 1) for i in range(n_nodes - 1)]  # temporal chain
+    edges += [(i + 1, i) for i in range(n_nodes - 1)]
+    sims = feats @ feats.T / (np.linalg.norm(feats, axis=1, keepdims=True) *
+                               np.linalg.norm(feats, axis=1, keepdims=True).T + 1e-8)
+    for i in range(n_nodes):
+        for j in range(n_nodes):
+            if i != j and sims[i, j] > 0.6:
+                edges.append((i, j))
+    edges = sorted(set(edges))
+    edge_index = np.array(edges, dtype=np.int64).T if edges else np.zeros((2, 0), dtype=np.int64)
+    return feats, edge_index
 
 
-def load_magnatagatune(root: str = "data/raw/magnatagatune") -> list[MusicSample]:
-    """MagnaTagATune: 188 multi-label tags, 25,877 clips -> restrict to top-50 tags."""
-    root = Path(root)
-    annot_path = root / "annotations_final.csv"
-    if not annot_path.exists():
-        raise FileNotFoundError(
-            f"{annot_path} not found. Download MagnaTagATune per Table 1, "
-            f"or run with --synthetic for a smoke test."
-        )
-    raise NotImplementedError(
-        "Populate once downloaded: filter to TOP_50_MAGNATAGATUNE_TAGS, "
-        "tokenize tag string with BERT tokenizer, build segment graphs from clip audio."
-    )
+class SyntheticMusicContextDataset(Dataset):
+    """One synthetic dataset backing all four tasks (tags, graph, captions,
+    valence/arousal), split via `split` ('train'/'val'/'test')."""
+
+    def __init__(self, n_samples=480, split="train", seed=42, max_length=32):
+        rng = np.random.default_rng(seed + hash(split) % 1000)
+        self.max_length = max_length
+        self.samples = []
+        for i in range(n_samples):
+            concept = int(rng.integers(0, len(CONCEPT_NAMES)))
+            tags = np.zeros(len(TAG_VOCAB), dtype=np.float32)
+            sl = CONCEPT_TAG_SLICE[concept]
+            active = rng.choice(range(sl.start, sl.stop),
+                                 size=rng.integers(2, 4), replace=False)
+            tags[active] = 1.0
+            # small cross-concept noise tag (models real-world label noise)
+            if rng.random() < 0.1:
+                tags[rng.integers(0, len(TAG_VOCAB))] = 1.0
+
+            n_words = rng.integers(6, 14)
+            words = list(rng.choice(CONCEPT_WORDS[concept], size=min(3, n_words), replace=False))
+            words += list(rng.choice(COMMON_WORDS, size=n_words - len(words), replace=True))
+            rng.shuffle(words)
+            caption_ids = tokenize(words, max_length)
+
+            feats, edge_index = _make_graph(rng, concept)
+
+            va = CONCEPT_VA[concept]
+            valence = float(np.clip(rng.normal(va[0], 0.6), 1, 9))
+            arousal = float(np.clip(rng.normal(va[1], 0.6), 1, 9))
+
+            self.samples.append(dict(
+                track_id=f"{split}_{i:04d}", concept=concept, tags=tags,
+                caption_ids=np.array(caption_ids, dtype=np.int64),
+                node_feats=feats, edge_index=edge_index,
+                valence=valence, arousal=arousal,
+                mel=feats.mean(axis=0),  # cheap stand-in "global" audio descriptor for CNN baseline
+            ))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+    @property
+    def n_tags(self):
+        return len(TAG_VOCAB)
 
 
-def load_musiccaps(root: str = "data/raw/musiccaps") -> list[MusicSample]:
-    """MusicCaps: 5,521 clips with natural-language captions (Google)."""
-    root = Path(root)
-    jsonl_path = root / "musiccaps.jsonl"
-    if not jsonl_path.exists():
-        raise FileNotFoundError(
-            f"{jsonl_path} not found. Download MusicCaps per Table 1, "
-            f"or run with --synthetic for a smoke test."
-        )
-    raise NotImplementedError(
-        "Populate once downloaded: read caption + ytid rows, pull the "
-        "corresponding 10s audio clip, build a segment graph per clip for "
-        "Task 4 contrastive (graph, caption) pairs."
-    )
+def collate_graphs(batch):
+    """Batch variable-sized graphs into one big disjoint graph (standard
+    GNN batching trick) + a batch-index vector for pooling."""
+    node_feats, edge_indices, batch_idx = [], [], []
+    offset = 0
+    for i, s in enumerate(batch):
+        node_feats.append(s["node_feats"])
+        ei = s["edge_index"]
+        if ei.shape[1] > 0:
+            edge_indices.append(ei + offset)
+        batch_idx.append(np.full(s["node_feats"].shape[0], i, dtype=np.int64))
+        offset += s["node_feats"].shape[0]
+    node_feats = torch.tensor(np.concatenate(node_feats, axis=0), dtype=torch.float32)
+    edge_index = torch.tensor(np.concatenate(edge_indices, axis=1) if edge_indices
+                               else np.zeros((2, 0), dtype=np.int64), dtype=torch.long)
+    batch_idx = torch.tensor(np.concatenate(batch_idx), dtype=torch.long)
+    tags = torch.tensor(np.stack([s["tags"] for s in batch]), dtype=torch.float32)
+    caption_ids = torch.tensor(np.stack([s["caption_ids"] for s in batch]), dtype=torch.long)
+    valence = torch.tensor([s["valence"] for s in batch], dtype=torch.float32)
+    arousal = torch.tensor([s["arousal"] for s in batch], dtype=torch.float32)
+    mel = torch.tensor(np.stack([s["mel"] for s in batch]), dtype=torch.float32)
+    return dict(node_feats=node_feats, edge_index=edge_index, batch_idx=batch_idx,
+                tags=tags, caption_ids=caption_ids, valence=valence, arousal=arousal,
+                mel=mel, n_graphs=len(batch))
 
 
-def load_deam(root: str = "data/raw/deam") -> list[MusicSample]:
-    """DEAM: continuous valence/arousal (1-9) every 0.5s -> use song-level mean as target."""
-    root = Path(root)
-    annot_path = root / "annotations" / "song_level.csv"
-    if not annot_path.exists():
-        raise FileNotFoundError(
-            f"{annot_path} not found. Download DEAM per Table 1, "
-            f"or run with --synthetic for a smoke test."
-        )
-    raise NotImplementedError(
-        "Populate once downloaded: aggregate per-timestep valence/arousal to "
-        "song-level mean, attach as auxiliary regression target for Task 3."
-    )
+def load_tag_names(data_root, dataset_name, n_tags):
+    """Reads data/processed/<dataset_name>/tag_names.json if preprocess_dataset.py
+    wrote one (e.g. GTZAN genre names); falls back to numeric placeholders
+    ('tag_0', 'tag_1', ...) so zero-shot tag prediction (Task 4) always has
+    *some* text prompt to embed, even for datasets without a saved vocab."""
+    path = os.path.join(data_root, dataset_name, "tag_names.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            names = json.load(f)
+        if len(names) == n_tags:
+            return names
+    return [f"tag_{i}" for i in range(n_tags)]
 
 
-# ---------------------------------------------------------------------------
-# Synthetic dataset (default for --synthetic; also used by unit tests)
-# ---------------------------------------------------------------------------
-def make_synthetic_dataset(
-    n_samples: int = 200,
-    num_tags: int = 50,
-    num_genres: int = 8,
-    graph_type: str = "segment",   # "segment" | "chord"
-    seed: int = 42,
-) -> list[MusicSample]:
-    """
-    Generates a small, internally-consistent synthetic dataset:
-    each sample gets a random genre, a text description drawn from a
-    genre-correlated tag vocabulary, a structure graph, and valence/arousal
-    targets loosely correlated with the genre — enough signal for a model to
-    learn something better than random, while requiring no downloads.
-    """
-    rng = random.Random(seed)
-    np_rng = np.random.default_rng(seed)
+class ProcessedMusicContextDataset(Dataset):
+    """Loads cached graphs + tag/caption/emotion tensors from
+    data/processed/<dataset_name>/{split}/*.pt written by
+    src/preprocess_dataset.py."""
 
-    genre_names = GTZAN_GENRES[:num_genres]
-    tag_vocab = TOP_50_MAGNATAGATUNE_TAGS[:num_tags]
-    # correlate a handful of tags with each genre so the task is learnable
-    genre_tag_bias = {
-        g: rng.sample(tag_vocab, k=min(5, len(tag_vocab))) for g in genre_names
-    }
-    genre_valence = {g: np_rng.uniform(2, 8) for g in genre_names}
-    genre_arousal = {g: np_rng.uniform(2, 8) for g in genre_names}
-    # Give each genre a fixed random "audio fingerprint" so that graph/audio
-    # features (not just text) actually carry genre signal -- otherwise a
-    # GNN trained on audio-only features has nothing to learn from.
-    node_feat_dim = 25  # 12 mean + 12 std (chroma) + 1 (chord one-hot minor bit, unused here)
-    genre_audio_bias = {
-        g: np_rng.normal(0, 1.5, size=node_feat_dim).astype(np.float32) for g in genre_names
-    }
-
-    samples = []
-    for i in range(n_samples):
-        genre_idx = i % num_genres
-        genre = genre_names[genre_idx]
-
-        track = synthetic_track(seed=seed + i)
-        if graph_type == "chord":
-            chords = estimate_chord_sequence(track["chroma"])
-            graph = build_chord_transition_graph(chords)
-            bias = genre_audio_bias[genre][: graph.x.shape[1]]
-            graph.x = graph.x + bias[None, :]
-        else:
-            segs = segment_windows(track["chroma"], sr=track["sr"], window_seconds=8.0)
-            embeds = [segment_embedding(s) for s in segs]
-            if len(embeds) < 2:
-                embeds = embeds * 2
-            bias = genre_audio_bias[genre][: embeds[0].shape[0]]
-            embeds = [e + bias for e in embeds]
-            graph = build_segment_similarity_graph(embeds, tau=0.85)
-
-        active_tags = set(genre_tag_bias[genre])
-        active_tags |= set(rng.sample(tag_vocab, k=2))  # noise tags
-        tags = np.zeros(num_tags, dtype=np.float32)
-        for t in active_tags:
-            tags[tag_vocab.index(t)] = 1.0
-
-        text = f"{genre} track featuring " + ", ".join(sorted(active_tags))
-
-        samples.append(
-            MusicSample(
-                track_id=f"synth_{i:04d}",
-                text=text,
-                tags=tags,
-                graph=graph,
-                genre=genre_idx,
-                valence=float(np_rng.normal(genre_valence[genre], 0.5)),
-                arousal=float(np_rng.normal(genre_arousal[genre], 0.5)),
+    def __init__(self, data_root, dataset_name, split):
+        self.dir = os.path.join(data_root, dataset_name, split)
+        self.files = sorted(glob.glob(os.path.join(self.dir, "*.pt")))
+        if not self.files:
+            raise FileNotFoundError(
+                f"No cached samples found under {self.dir}. Run "
+                f"src/preprocess_dataset.py first, or use --synthetic for "
+                f"a no-download smoke test."
             )
-        )
-    return samples
 
+    def __len__(self):
+        return len(self.files)
 
-def train_val_test_split(
-    samples: list[MusicSample], ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
-    seed: int = 42,
-) -> dict[str, list[MusicSample]]:
-    rng = random.Random(seed)
-    idx = list(range(len(samples)))
-    rng.shuffle(idx)
-    n = len(idx)
-    n_train = int(ratios[0] * n)
-    n_val = int(ratios[1] * n)
-    return {
-        "train": [samples[i] for i in idx[:n_train]],
-        "val": [samples[i] for i in idx[n_train : n_train + n_val]],
-        "test": [samples[i] for i in idx[n_train + n_val :]],
-    }
+    def __getitem__(self, idx):
+        # weights_only=False: these .pt files are written by our own
+        # preprocess_dataset.py (trusted, locally generated) and contain
+        # plain dicts of tensors/floats/strings, not arbitrary pickled
+        # objects — safe to disable PyTorch 2.6+'s stricter default here.
+        return torch.load(self.files[idx], weights_only=False)
 
-
-def save_split_ids(splits: dict[str, list[MusicSample]], out_path: str) -> None:
-    payload = {k: [s.track_id for s in v] for k, v in splits.items()}
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump(payload, f, indent=2)
-
-
-if __name__ == "__main__":
-    ds = make_synthetic_dataset(n_samples=20)
-    splits = train_val_test_split(ds)
-    save_split_ids(splits, "data/splits/synthetic_split.json")
-    print({k: len(v) for k, v in splits.items()})
-    print("example text:", ds[0].text)
-    print("example graph:", ds[0].graph)
+    @property
+    def n_tags(self):
+        return self[0]["tags"].shape[0]

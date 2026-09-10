@@ -1,0 +1,57 @@
+[
+  {
+    "true_tags": [
+      "blues"
+    ],
+    "predicted_top4": [
+      "blues",
+      "hiphop",
+      "pop",
+      "country"
+    ]
+  },
+  {
+    "true_tags": [
+      "blues"
+    ],
+    "predicted_top4": [
+      "blues",
+      "classical",
+      "rock",
+      "hiphop"
+    ]
+  },
+  {
+    "true_tags": [
+      "blues"
+    ],
+    "predicted_top4": [
+      "blues",
+      "classical",
+      "hiphop",
+      "rock"
+    ]
+  },
+  {
+    "true_tags": [
+      "blues"
+    ],
+    "predicted_top4": [
+      "blues",
+      "disco",
+      "jazz",
+      "rock"
+    ]
+  },
+  {
+    "true_tags": [
+      "blues"
+    ],
+    "predicted_top4": [
+      "blues",
+      "classical",
+      "rock",
+      "country"
+    ]
+  }
+]
