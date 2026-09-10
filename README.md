@@ -2,7 +2,7 @@
 
 **GNN-Based BERT for Understanding Context from Music**
 Course: Neural Networks (CSE425 / EEE474 / CSE715) — Supervised Neural Network Project
-Prepared by: [your name] · Deadline: 2 Oct 2026
+
 
 A hybrid **BERT + Graph Neural Network** system for understanding musical context:
 multi-label tagging, mood/emotion regression, and cross-modal audio↔text alignment.
