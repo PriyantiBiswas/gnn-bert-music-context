@@ -1,57 +1,57 @@
 [
   {
     "true_tags": [
-      "0"
+      "blues"
     ],
-    "predicted_top4_idx": [
-      "0",
-      "4",
-      "7",
-      "2"
+    "predicted_top4": [
+      "blues",
+      "hiphop",
+      "pop",
+      "country"
     ]
   },
   {
     "true_tags": [
-      "0"
+      "blues"
     ],
-    "predicted_top4_idx": [
-      "0",
-      "1",
-      "9",
-      "4"
+    "predicted_top4": [
+      "blues",
+      "classical",
+      "rock",
+      "hiphop"
     ]
   },
   {
     "true_tags": [
-      "0"
+      "blues"
     ],
-    "predicted_top4_idx": [
-      "0",
-      "1",
-      "4",
-      "9"
+    "predicted_top4": [
+      "blues",
+      "classical",
+      "hiphop",
+      "rock"
     ]
   },
   {
     "true_tags": [
-      "0"
+      "blues"
     ],
-    "predicted_top4_idx": [
-      "0",
-      "3",
-      "5",
-      "9"
+    "predicted_top4": [
+      "blues",
+      "disco",
+      "jazz",
+      "rock"
     ]
   },
   {
     "true_tags": [
-      "0"
+      "blues"
     ],
-    "predicted_top4_idx": [
-      "0",
-      "1",
-      "9",
-      "2"
+    "predicted_top4": [
+      "blues",
+      "classical",
+      "rock",
+      "country"
     ]
   }
 ]

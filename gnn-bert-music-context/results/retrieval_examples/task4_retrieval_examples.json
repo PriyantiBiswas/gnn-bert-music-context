@@ -1,91 +1,91 @@
 [
   {
     "query_track": "blues.00021",
-    "top3_retrieved_indices": [
-      132,
-      71,
-      4
+    "top3_retrieved_track_ids": [
+      "blues.00076",
+      "blues.00080",
+      "reggae.00071"
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00026",
-    "top3_retrieved_indices": [
-      67,
-      60,
-      71
+    "top3_retrieved_track_ids": [
+      "blues.00080",
+      "blues.00033",
+      "blues.00092"
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00030",
-    "top3_retrieved_indices": [
-      1,
-      36,
-      2
+    "top3_retrieved_track_ids": [
+      "blues.00032",
+      "rock.00013",
+      "blues.00021"
     ],
-    "correct_in_top3": true
+    "correct_in_top3": false
   },
   {
     "query_track": "blues.00032",
-    "top3_retrieved_indices": [
-      3,
-      5,
-      138
+    "top3_retrieved_track_ids": [
+      "blues.00096",
+      "blues.00032",
+      "blues.00021"
     ],
     "correct_in_top3": true
   },
   {
     "query_track": "blues.00033",
-    "top3_retrieved_indices": [
-      2,
-      9,
-      1
+    "top3_retrieved_track_ids": [
+      "blues.00032",
+      "blues.00021",
+      "rock.00013"
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00037",
-    "top3_retrieved_indices": [
-      4,
-      53,
-      47
+    "top3_retrieved_track_ids": [
+      "rock.00008",
+      "disco.00085",
+      "rock.00025"
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00045",
-    "top3_retrieved_indices": [
-      67,
-      60,
-      13
+    "top3_retrieved_track_ids": [
+      "blues.00092",
+      "rock.00021",
+      "blues.00030"
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00048",
-    "top3_retrieved_indices": [
-      92,
-      100,
-      103
+    "top3_retrieved_track_ids": [
+      "disco.00012",
+      "rock.00021",
+      "disco.00001"
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00049",
-    "top3_retrieved_indices": [
-      71,
-      60,
-      55
+    "top3_retrieved_track_ids": [
+      "blues.00092",
+      "blues.00030",
+      "blues.00021"
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00076",
-    "top3_retrieved_indices": [
-      49,
-      95,
-      46
+    "top3_retrieved_track_ids": [
+      "disco.00061",
+      "disco.00012",
+      "blues.00087"
     ],
     "correct_in_top3": false
   }

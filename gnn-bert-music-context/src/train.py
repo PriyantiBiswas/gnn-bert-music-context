@@ -26,13 +26,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.utils import set_seed, load_config, save_json, device
 from src.datasets import (
     SyntheticMusicContextDataset, ProcessedMusicContextDataset,
-    collate_graphs, VOCAB_SIZE,
+    collate_graphs, VOCAB_SIZE, load_tag_names, TAG_VOCAB,
 )
 from src.bert_encoder import MiniTextEncoder, BertTagClassifier, bce_loss, compute_pos_weight
 from src.gnn_model import GraphSAGE, GNNTagClassifier, CNNBaseline
 from src.fusion_model import GNNBertFusion, multitask_loss
 from src.contrastive import DualEncoder, info_nce_loss, retrieval_recall_at_k
 from src.evaluate import tag_metrics, emotion_metrics, random_baseline, pca_mlp_baseline
+from src.graph_builder import graph_coherence_score
 
 RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
 PLOTS = os.path.join(RESULTS, "plots")
@@ -66,6 +67,13 @@ def _plot_curve(history: dict, title: str, fname: str):
     plt.close()
 
 
+def _samples(ds):
+    """Uniform accessor: SyntheticMusicContextDataset has .samples (list of
+    dicts); ProcessedMusicContextDataset lazy-loads via __getitem__. Returns
+    a list either way (materializes real data once, fine at this scale)."""
+    return ds.samples if hasattr(ds, "samples") else [ds[i] for i in range(len(ds))]
+
+
 def get_loaders(args, cfg):
     if args.synthetic:
         train_ds = SyntheticMusicContextDataset(n_samples=args.n_samples, split="train",
@@ -84,6 +92,12 @@ def get_loaders(args, cfg):
     return train_ds, val_ds, test_ds, mk(train_ds, True), mk(val_ds, False), mk(test_ds, False)
 
 
+def _tag_names_for(args, n_tags):
+    if args.synthetic:
+        return TAG_VOCAB if len(TAG_VOCAB) == n_tags else [f"tag_{i}" for i in range(n_tags)]
+    return load_tag_names(args.data_root, args.dataset, n_tags)
+
+
 # --------------------------------------------------------------------------- #
 # Task 1: BERT tag classifier
 # --------------------------------------------------------------------------- #
@@ -93,9 +107,7 @@ def run_task1(args, cfg, dev):
                                cfg["text"]["n_heads"], cfg["text"]["max_length"]).to(dev)
     model = BertTagClassifier(encoder, train_ds.n_tags).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"])
-    pos_weight = compute_pos_weight(np.stack([s["tags"] for s in train_ds.samples])
-                                     if hasattr(train_ds, "samples")
-                                     else np.stack([train_ds[i]["tags"] for i in range(len(train_ds))]), dev)
+    pos_weight = compute_pos_weight(np.stack([s["tags"] for s in _samples(train_ds)]), dev)
 
     hist = {"train_macro_f1": [], "val_macro_f1": []}
     for epoch in range(args.epochs):
@@ -117,23 +129,19 @@ def run_task1(args, cfg, dev):
     print("[Task1] TEST:", test_m)
     _plot_curve(hist, "Task 1: BERT tag classifier — Macro-F1", "task1_f1_curve.png")
 
-    # 5 example predictions
+    tag_names = _tag_names_for(args, train_ds.n_tags)
     model.eval()
     examples = []
     with torch.no_grad():
         batch = next(iter(test_dl))
         probs = torch.sigmoid(model(batch["caption_ids"].to(dev))).cpu().numpy()
-        from src.datasets import TAG_VOCAB
         for i in range(min(5, probs.shape[0])):
-            true_tags = [TAG_VOCAB[k] for k in range(len(TAG_VOCAB)) if batch["tags"][i, k] == 1] \
-                if len(TAG_VOCAB) == batch["tags"].shape[1] else \
-                [str(k) for k in range(batch["tags"].shape[1]) if batch["tags"][i, k] == 1]
-            pred_tags = [str(k) for k in np.argsort(-probs[i])[:4]]
-            examples.append({"true_tags": true_tags, "predicted_top4_idx": pred_tags})
+            true_tags = [tag_names[k] for k in range(len(tag_names)) if batch["tags"][i, k] == 1]
+            pred_tags = [tag_names[k] for k in np.argsort(-probs[i])[:4]]
+            examples.append({"true_tags": true_tags, "predicted_top4": pred_tags})
     save_json(examples, os.path.join(RESULTS, "task1_example_predictions.json"))
 
-    y_true_test = np.stack([test_ds.samples[i]["tags"] for i in range(len(test_ds))]) \
-        if hasattr(test_ds, "samples") else np.stack([test_ds[i]["tags"] for i in range(len(test_ds))])
+    y_true_test = np.stack([s["tags"] for s in _samples(test_ds)])
     baseline = random_baseline(y_true_test)
     _update_metrics("task1_bert", {"test": test_m, "history": hist})
     _update_metrics("baseline_B1_random", baseline)
@@ -152,22 +160,22 @@ def _eval_task1(model, dl, dev):
 
 
 # --------------------------------------------------------------------------- #
-# Task 2: GNN on segment/chord graphs, vs CNN baseline
+# Task 2: GNN on segment/chord graphs, vs CNN baseline, vs B4 (PCA+MLP)
 # --------------------------------------------------------------------------- #
 def run_task2(args, cfg, dev):
     train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = get_loaders(args, cfg)
-    sample0 = train_ds.samples[0] if hasattr(train_ds, "samples") else train_ds[0]
-    in_dim = sample0["node_feats"].shape[1]
+    train_samples = _samples(train_ds)
+    test_samples = _samples(test_ds)
+    in_dim = train_samples[0]["node_feats"].shape[1]
+    mel_dim = train_samples[0]["mel"].shape[0]
+
     model = GNNTagClassifier(in_dim, train_ds.n_tags, cfg["gnn"]["hidden_dim"],
                               cfg["gnn"]["n_layers"], cfg["gnn"]["dropout"]).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"])
 
-    cnn = CNNBaseline(sample0["mel"].shape[0], train_ds.n_tags, cfg["gnn"]["hidden_dim"]).to(dev)
+    cnn = CNNBaseline(mel_dim, train_ds.n_tags, cfg["gnn"]["hidden_dim"]).to(dev)
     cnn_opt = torch.optim.Adam(cnn.parameters(), lr=cfg["training"]["lr"])
-
-    all_tags = np.stack([train_ds.samples[i]["tags"] for i in range(len(train_ds))]) \
-        if hasattr(train_ds, "samples") else np.stack([train_ds[i]["tags"] for i in range(len(train_ds))])
-    pos_weight = compute_pos_weight(all_tags, dev)
+    pos_weight = compute_pos_weight(np.stack([s["tags"] for s in train_samples]), dev)
 
     hist = {"gnn_val_macro_f1": [], "cnn_val_macro_f1": []}
     for epoch in range(args.epochs):
@@ -197,6 +205,23 @@ def run_task2(args, cfg, dev):
     _plot_curve(hist, "Task 2: GNN vs CNN baseline — Macro-F1", "task2_gnn_vs_cnn.png")
     _update_metrics("task2_gnn", {"test": gnn_test, "history": hist})
     _update_metrics("baseline_B2_cnn", cnn_test)
+
+    # --- B4: PCA + MLP on hand-crafted (pooled mel) audio features ---
+    X_train = np.stack([s["mel"].numpy() if torch.is_tensor(s["mel"]) else s["mel"] for s in train_samples])
+    y_train = np.stack([s["tags"].numpy() if torch.is_tensor(s["tags"]) else s["tags"] for s in train_samples])
+    X_test = np.stack([s["mel"].numpy() if torch.is_tensor(s["mel"]) else s["mel"] for s in test_samples])
+    y_test = np.stack([s["tags"].numpy() if torch.is_tensor(s["tags"]) else s["tags"] for s in test_samples])
+    b4_result = pca_mlp_baseline(X_train, y_train, X_test, y_test, n_components=min(16, X_train.shape[1]),
+                                  seed=cfg["seed"])
+    print("[Task2] TEST B4 (PCA+MLP):", b4_result)
+    _update_metrics("baseline_B4_pca_mlp", b4_result)
+
+    # --- Graph coherence score (Section 6, optional analysis): do the GNN's
+    # learned node embeddings agree with the graph's own similarity edges? ---
+    coherence = _graph_coherence_over_dataset(model, test_samples, dev)
+    print(f"[Task2] TEST graph coherence score: {coherence:.3f}")
+    _update_metrics("task2_graph_coherence", {"mean_coherence": coherence})
+
     return gnn_test
 
 
@@ -223,16 +248,36 @@ def _eval_task2_cnn(model, dl, dev):
     return tag_metrics(np.concatenate(all_true), np.concatenate(all_prob))
 
 
+def _graph_coherence_over_dataset(model, samples, dev, max_graphs=50, tau=0.6):
+    """Runs the trained GNN's message-passing layers (not the tag head) on
+    each graph individually (unbatched, so edge_index stays in local node
+    indices) and averages graph_builder.graph_coherence_score across up to
+    max_graphs test graphs."""
+    model.eval()
+    scores = []
+    with torch.no_grad():
+        for s in samples[:max_graphs]:
+            nf = s["node_feats"]
+            nf = torch.as_tensor(nf, dtype=torch.float32).to(dev)
+            ei = s["edge_index"]
+            ei = torch.as_tensor(ei, dtype=torch.long).to(dev)
+            if ei.numel() == 0 or nf.shape[0] < 2:
+                continue
+            h = model.gnn(nf, ei)  # node embeddings, pre-readout
+            score = graph_coherence_score(h.cpu().numpy(), ei.cpu().numpy(), tau=tau)
+            scores.append(score)
+    return float(np.mean(scores)) if scores else 0.0
+
+
+
 # --------------------------------------------------------------------------- #
 # Task 3: GNN-BERT fusion (+ ablations) and emotion regression
 # --------------------------------------------------------------------------- #
 def run_task3(args, cfg, dev):
     train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = get_loaders(args, cfg)
-    sample0 = train_ds.samples[0] if hasattr(train_ds, "samples") else train_ds[0]
-    in_dim = sample0["node_feats"].shape[1]
-
-    all_tags = np.stack([train_ds.samples[i]["tags"] for i in range(len(train_ds))]) \
-        if hasattr(train_ds, "samples") else np.stack([train_ds[i]["tags"] for i in range(len(train_ds))])
+    train_samples = _samples(train_ds)
+    in_dim = train_samples[0]["node_feats"].shape[1]
+    all_tags = np.stack([s["tags"] for s in train_samples])
 
     modes = ["bert_only", "gnn_only", "concat", "cross_attention"] if args.ablation else [args.fusion]
     ablation_results = {}
@@ -242,8 +287,6 @@ def run_task3(args, cfg, dev):
         text = MiniTextEncoder(VOCAB_SIZE, cfg["text"]["embed_dim"], cfg["text"]["n_layers"],
                                 cfg["text"]["n_heads"], cfg["text"]["max_length"])
         model = GNNBertFusion(gnn, text, train_ds.n_tags, fusion_mode=mode).to(dev)
-        # fusion models have more parameters (attention/concat heads on top of
-        # two encoders) so a lower LR trains more stably than the shared default
         opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"] * 0.5)
         pos_weight = compute_pos_weight(all_tags, dev)
 
@@ -276,8 +319,8 @@ def run_task3(args, cfg, dev):
     _update_metrics("task3_fusion_ablation", ablation_results)
 
     if final_model is not None:
-        _tsne_plot(final_model, test_dl, dev, test_ds)
-        _case_studies(final_model, test_dl, dev)
+        _tsne_plot(final_model, test_dl, dev, _samples(test_ds))
+        _case_studies(final_model, test_dl, dev, _tag_names_for(args, train_ds.n_tags))
     return ablation_results
 
 
@@ -298,13 +341,13 @@ def _eval_task3(model, dl, dev):
     return {**tm, **em}
 
 
-def _tsne_plot(model, dl, dev, test_ds):
+def _tsne_plot(model, dl, dev, test_samples):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from sklearn.manifold import TSNE
     model.eval()
-    zs, concepts = [], []
+    zs = []
     with torch.no_grad():
         for batch in dl:
             from src.gnn_model import GraphSAGE
@@ -316,8 +359,7 @@ def _tsne_plot(model, dl, dev, test_ds):
             else:
                 z = torch.cat([g, cls], dim=-1)
             zs.append(z.cpu().numpy())
-    concepts = np.array([int(s.get("concept", 0)) for s in test_ds.samples]) if hasattr(test_ds, "samples") else \
-               np.array([int(test_ds[i].get("concept", 0)) for i in range(len(test_ds))])
+    concepts = np.array([int(s.get("concept", 0)) for s in test_samples])
     Z = np.concatenate(zs)
     n = min(len(Z), len(concepts))
     Z, concepts = Z[:n], concepts[:n]
@@ -336,8 +378,7 @@ def _tsne_plot(model, dl, dev, test_ds):
     plt.close()
 
 
-def _case_studies(model, dl, dev, n=3):
-    from src.datasets import TAG_VOCAB
+def _case_studies(model, dl, dev, tag_names, n=3):
     model.eval()
     batch = next(iter(dl))
     with torch.no_grad():
@@ -346,12 +387,9 @@ def _case_studies(model, dl, dev, n=3):
                                            batch["caption_ids"].to(dev))
     probs = torch.sigmoid(tag_logits).cpu().numpy()
     cases = []
-    n_tags = probs.shape[1]
     for i in range(min(n, probs.shape[0])):
-        top_idx = np.argsort(-probs[i])[:3]
-        labels = [TAG_VOCAB[k] if n_tags == len(TAG_VOCAB) else str(k) for k in top_idx]
         entry = {
-            "predicted_top_tags": labels,
+            "predicted_top_tags": [tag_names[k] for k in np.argsort(-probs[i])[:3]],
             "predicted_valence_arousal": va_pred[i].tolist(),
         }
         if attn is not None:
@@ -361,12 +399,12 @@ def _case_studies(model, dl, dev, n=3):
 
 
 # --------------------------------------------------------------------------- #
-# Task 4: contrastive dual-encoder + retrieval
+# Task 4: contrastive dual-encoder + retrieval + zero-shot tag prediction
 # --------------------------------------------------------------------------- #
 def run_task4(args, cfg, dev):
     train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = get_loaders(args, cfg)
-    sample0 = train_ds.samples[0] if hasattr(train_ds, "samples") else train_ds[0]
-    in_dim = sample0["node_feats"].shape[1]
+    train_samples = _samples(train_ds)
+    in_dim = train_samples[0]["node_feats"].shape[1]
     gnn = GraphSAGE(in_dim, cfg["gnn"]["hidden_dim"], cfg["gnn"]["n_layers"], cfg["gnn"]["dropout"])
     text = MiniTextEncoder(VOCAB_SIZE, cfg["text"]["embed_dim"], cfg["text"]["n_layers"],
                             cfg["text"]["n_heads"], cfg["text"]["max_length"])
@@ -391,15 +429,25 @@ def run_task4(args, cfg, dev):
         print(f"[Task4][epoch {epoch+1}/{args.epochs}] loss={hist['train_loss'][-1]:.4f} "
               f"val R@5(audio->caption)={hist['val_R@5_a2c'][-1]:.3f}")
 
-    test_r = _eval_task4(model, test_dl, dev, save_examples=True)
+    test_r = _eval_task4(model, test_dl, dev, save_examples=True, test_samples=_samples(test_ds))
     print("[Task4] TEST retrieval:", test_r)
     _plot_curve({"train_loss": hist["train_loss"]}, "Task 4: contrastive InfoNCE loss", "task4_loss_curve.png")
     _plot_curve({"val_R@5_a2c": hist["val_R@5_a2c"]}, "Task 4: val Audio->Caption R@5", "task4_recall_curve.png")
     _update_metrics("task4_contrastive", {"test": test_r, "history": hist})
+
+    # --- Zero-shot tag prediction from captions, vs. Task 3 supervised ---
+    # (spec Section 4.4 deliverable: "Zero-shot tag prediction from captions
+    # vs. Task 3 supervised model")
+    tag_names = _tag_names_for(args, train_ds.n_tags)
+    zero_shot = _zero_shot_tag_eval(model, test_dl, tag_names, cfg["text"]["max_length"], dev)
+    print("[Task4] TEST zero-shot tag prediction:", zero_shot)
+    _update_metrics("task4_zero_shot_tag_prediction", zero_shot)
+    _compare_zero_shot_vs_task3(zero_shot)
+
     return test_r
 
 
-def _eval_task4(model, dl, dev, save_examples=False):
+def _eval_task4(model, dl, dev, save_examples=False, test_samples=None):
     model.eval()
     g_all, t_all = [], []
     with torch.no_grad():
@@ -409,21 +457,69 @@ def _eval_task4(model, dl, dev, save_examples=False):
             g_all.append(g_e.cpu()); t_all.append(t_e.cpu())
     g_all, t_all = torch.cat(g_all), torch.cat(t_all)
     metrics = retrieval_recall_at_k(g_all, t_all)
-    if save_examples:
+    if save_examples and test_samples is not None:
         sims = (g_all @ t_all.t()).numpy()
         examples = []
-        ds = dl.dataset
-        n = len(ds)
-        for i in range(min(10, n)):
+        for i in range(min(10, len(test_samples))):
             top3 = np.argsort(-sims[i])[:3].tolist()
-            s_i = ds.samples[i] if hasattr(ds, "samples") else ds[i]
             examples.append({
-                "query_track": s_i.get("track_id", str(i)),
-                "top3_retrieved_indices": top3,
+                "query_track": test_samples[i].get("track_id", str(i)),
+                "top3_retrieved_track_ids": [test_samples[j].get("track_id", str(j)) for j in top3],
                 "correct_in_top3": bool(i in top3),
             })
         save_json(examples, os.path.join(RETRIEVAL, "task4_retrieval_examples.json"))
     return metrics
+
+
+def _zero_shot_tag_eval(model, test_dl, tag_names, max_length, dev):
+    """Embeds each tag name as a short text prompt ("a song about <tag>")
+    with the Task 4 dual encoder's *text tower only* (no classifier head was
+    ever trained for this), then scores each test clip by cosine similarity
+    between its graph embedding and every tag-prompt embedding. This is
+    genuinely zero-shot: the tag head from Task 1/3 is never used here."""
+    from src.datasets import tokenize
+    model.eval()
+    prompts = [tokenize(["a", "song", "about", name], max_length) for name in tag_names]
+    prompt_ids = torch.tensor(prompts, dtype=torch.long, device=dev)
+    with torch.no_grad():
+        tag_embeds = model.encode_text(prompt_ids)  # [K, D], L2-normalized
+
+    all_true, all_sim = [], []
+    with torch.no_grad():
+        for batch in test_dl:
+            g_e = model.encode_graph(batch["node_feats"].to(dev), batch["edge_index"].to(dev),
+                                      batch["batch_idx"].to(dev), batch["n_graphs"])
+            sims = g_e @ tag_embeds.t()  # cosine similarity, both sides normalized, in [-1, 1]
+            all_sim.append(sims.cpu().numpy())
+            all_true.append(batch["tags"].numpy())
+    y_true = np.concatenate(all_true)
+    # squash cosine similarity into a pseudo-probability for F1/AUC-PR scoring
+    y_prob = 1.0 / (1.0 + np.exp(-5.0 * np.concatenate(all_sim)))
+    return tag_metrics(y_true, y_prob)
+
+
+def _compare_zero_shot_vs_task3(zero_shot_metrics):
+    """Reads task3's already-saved metrics (if present) and logs a direct
+    zero-shot-vs-supervised comparison, per the spec's explicit deliverable."""
+    if not os.path.exists(METRICS_PATH):
+        return
+    with open(METRICS_PATH) as f:
+        all_metrics = json.load(f)
+    task3 = all_metrics.get("task3_fusion_ablation")
+    if not task3:
+        print("[Task4] (Task 3 not yet run in this results/metrics.json — "
+              "run Task 3 first for a zero-shot-vs-supervised comparison.)")
+        return
+    # prefer the cross_attention entry if the ablation was run, else whatever's there
+    task3_entry = task3.get("cross_attention", next(iter(task3.values())))
+    comparison = {
+        "zero_shot_task4_macro_f1": zero_shot_metrics["macro_f1"],
+        "zero_shot_task4_mean_aucpr": zero_shot_metrics["mean_aucpr"],
+        "supervised_task3_macro_f1": task3_entry["test"]["macro_f1"],
+        "supervised_task3_mean_aucpr": task3_entry["test"]["mean_aucpr"],
+    }
+    print("[Task4] zero-shot vs. Task 3 supervised:", comparison)
+    _update_metrics("zero_shot_vs_task3_supervised", comparison)
 
 
 # --------------------------------------------------------------------------- #
