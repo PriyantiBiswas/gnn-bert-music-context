@@ -12,41 +12,66 @@ head combines both for downstream prediction; a contrastive dual-encoder
 aligns audio and text into a shared embedding space for retrieval.
 
 ## Project structure
+
+## Project Structure
+
+```text
 gnn-bert-music-context/
 ├── README.md
 ├── requirements.txt
 ├── config.yaml
+│
 ├── data/
-│ ├── raw/
-│ │ ├── gtzan/<10 genre folders>/.wav # GTZAN download
-│ │ └── deam/MEMD_audio/.mp3, annotations/ # DEAM download
-│ ├── processed/
-│ │ ├── gtzan/{train,val,test}/.pt, tag_names.json
-│ │ └── deam/{train,val,test}/.pt, tag_names.json
-│ └── splits/
-│ ├── gtzan_splits.json # train/val/test track_id manifest
-│ └── deam_splits.json # + real valence/arousal/quadrant per track
+│   ├── raw/
+│   │   ├── gtzan/
+│   │   │   └── <10 genre folders>/
+│   │   │       └── *.wav
+│   │   └── deam/
+│   │       ├── MEMD_audio/
+│   │       │   └── *.mp3
+│   │       └── annotations/
+│   │
+│   ├── processed/
+│   │   ├── gtzan/
+│   │   │   ├── train/
+│   │   │   ├── val/
+│   │   │   ├── test/
+│   │   │   └── tag_names.json
+│   │   └── deam/
+│   │       ├── train/
+│   │       ├── val/
+│   │       ├── test/
+│   │       └── tag_names.json
+│   │
+│   └── splits/
+│       ├── gtzan_splits.json
+│       └── deam_splits.json
+│
 ├── notebooks/
-│ ├── eda.ipynb
-│ └── demo_context.ipynb
+│   ├── eda.ipynb
+│   └── demo_context.ipynb
+│
 ├── src/
-│ ├── audio_features.py # mel-spectrogram extraction, segmentation (librosa)
-│ ├── graph_builder.py # segment-similarity & chord-transition graphs
-│ ├── preprocess_dataset.py # GTZAN: audio -> graphs, genre tags, descriptive captions
-│ ├── preprocess_deam.py # DEAM: audio -> graphs, mood-quadrant tags/captions from real valence/arousal
-│ ├── bert_encoder.py # Task 1: text encoder (MiniTextEncoder) + tag classifier
-│ ├── gnn_model.py # Task 2: GraphSAGE / GAT encoder + CNN baseline (B2)
-│ ├── fusion_model.py # Task 3: cross-attention GNN-BERT fusion + emotion regression head
-│ ├── contrastive.py # Task 4: InfoNCE dual-encoder + retrieval R@K
-│ ├── datasets.py # synthetic corpus (offline smoke test) + real .pt loader + vocabulary
-│ ├── evaluate.py # Macro/Micro-F1, AUC-PR, MAE/R², baselines B1 & B4
-│ └── train.py # unified entrypoint (--task 1|2|3|4, --synthetic or --dataset ...)
+│   ├── audio_features.py
+│   ├── graph_builder.py
+│   ├── preprocess_dataset.py
+│   ├── preprocess_deam.py
+│   ├── bert_encoder.py
+│   ├── gnn_model.py
+│   ├── fusion_model.py
+│   ├── contrastive.py
+│   ├── datasets.py
+│   ├── evaluate.py
+│   └── train.py
+│
 ├── results/
-│ ├── metrics.json # all tasks + baselines, merged by key (back up before switching datasets!)
-│ ├── plots/ # *.png per task
-│ └── retrieval_examples/ # Task 4 qualitative examples
+│   ├── metrics.json
+│   ├── plots/
+│   │   └── *.png
+│   └── retrieval_examples/
+│
 └── report/
-└── final_report.pdf
+    └── final_report.pdf
 
 
 
