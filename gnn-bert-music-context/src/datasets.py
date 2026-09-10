@@ -50,11 +50,42 @@ CONCEPT_WORDS = {
 }
 COMMON_WORDS = ["the", "song", "features", "a", "track", "with", "sound", "of", "music"]
 
+COMMON_WORDS = ["the", "song", "features", "a", "track", "with", "sound", "of", "music"]
+
+# Extra domain words for real-dataset preprocessing scripts (preprocess_dataset.py
+# for GTZAN, preprocess_deam.py for DEAM). Any word tokenized into a real
+# caption but missing from VOCAB collapses to UNK, silently destroying the
+# text signal (this bit us once already) -- every descriptive/label word
+# those scripts can put into a caption must be listed here.
+EXTRA_DATASET_WORDS = [
+    # GTZAN genre names (kept for Task 4 zero-shot prompts, e.g. "a song about jazz";
+    # NOT used inside GTZAN captions themselves, to avoid trivial label leakage)
+    "blues", "classical", "country", "disco", "hiphop", "jazz", "metal",
+    "pop", "reggae", "rock", "genre",
+    # GTZAN caption descriptive adjectives (see preprocess_dataset.py::GTZAN_GENRE_WORDS)
+    "mournful", "soulful", "slide-guitar", "twelve-bar", "weary", "harmonica",
+    "orchestral", "symphonic", "stately", "ornate", "composed", "refined",
+    "twangy", "storytelling", "rural", "banjo", "heartfelt", "dusty",
+    "groovy", "four-on-the-floor", "glittery", "strings", "dancefloor", "retro",
+    "rhythmic", "sampled", "spoken-word", "urban", "bassy", "looped",
+    "improvised", "syncopated", "smoky", "brassy", "swinging", "intricate",
+    "distorted", "heavy", "aggressive", "screaming", "powerful", "intense",
+    "catchy", "polished", "bright", "radio-ready", "hooky", "upbeat",
+    "offbeat", "laid-back", "island", "skanking", "mellow", "loping",
+    "driving", "electric", "riff-heavy", "energetic", "raw", "anthemic",
+    # DEAM mood-quadrant descriptive adjectives (see preprocess_deam.py::QUADRANT_WORDS)
+    "joyful", "vibrant", "triumphant", "sparkling", "exuberant",
+    "peaceful", "warm", "gentle", "soothing", "serene", "tender",
+    "tense", "frantic", "harsh", "chaotic", "jarring",
+    "melancholic", "somber", "bleak", "hollow",
+    "mood",
+]
+
 
 def _vocab():
-    words = sorted(set(COMMON_WORDS + [w for ws in CONCEPT_WORDS.values() for w in ws]))
+    words = sorted(set(COMMON_WORDS + EXTRA_DATASET_WORDS +
+                        [w for ws in CONCEPT_WORDS.values() for w in ws]))
     return {w: i + 4 for i, w in enumerate(words)}  # 0..3 reserved (PAD,CLS,SEP,UNK)
-
 
 VOCAB = _vocab()
 PAD, CLS, SEP, UNK = 0, 1, 2, 3

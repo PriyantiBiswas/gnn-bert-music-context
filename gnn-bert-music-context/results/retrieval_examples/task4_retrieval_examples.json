@@ -2,26 +2,26 @@
   {
     "query_track": "blues.00021",
     "top3_retrieved_indices": [
-      149,
-      148,
-      0
+      132,
+      71,
+      4
     ],
-    "correct_in_top3": true
+    "correct_in_top3": false
   },
   {
     "query_track": "blues.00026",
     "top3_retrieved_indices": [
-      149,
-      148,
-      144
+      67,
+      60,
+      71
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00030",
     "top3_retrieved_indices": [
-      0,
       1,
+      36,
       2
     ],
     "correct_in_top3": true
@@ -29,63 +29,63 @@
   {
     "query_track": "blues.00032",
     "top3_retrieved_indices": [
-      149,
-      148,
-      0
+      3,
+      5,
+      138
     ],
-    "correct_in_top3": false
+    "correct_in_top3": true
   },
   {
     "query_track": "blues.00033",
     "top3_retrieved_indices": [
-      149,
-      148,
-      0
+      2,
+      9,
+      1
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00037",
     "top3_retrieved_indices": [
-      149,
-      148,
-      144
+      4,
+      53,
+      47
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00045",
     "top3_retrieved_indices": [
-      149,
-      148,
-      0
+      67,
+      60,
+      13
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00048",
     "top3_retrieved_indices": [
-      149,
-      148,
-      0
+      92,
+      100,
+      103
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00049",
     "top3_retrieved_indices": [
-      149,
-      148,
-      144
+      71,
+      60,
+      55
     ],
     "correct_in_top3": false
   },
   {
     "query_track": "blues.00076",
     "top3_retrieved_indices": [
-      149,
-      148,
-      144
+      49,
+      95,
+      46
     ],
     "correct_in_top3": false
   }

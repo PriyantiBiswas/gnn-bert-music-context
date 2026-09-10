@@ -30,23 +30,38 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.audio_features import load_audio, extract_segment_features
 from src.graph_builder import build_segment_graph
 from src.datasets import tokenize  # swap for a real HF tokenizer once using HFBertEncoder
-
 GTZAN_GENRES = ["blues", "classical", "country", "disco", "hiphop",
                 "jazz", "metal", "pop", "reggae", "rock"]
-
+GTZAN_GENRE_WORDS = {
+    "blues": ["mournful", "soulful", "slide-guitar", "twelve-bar", "weary", "harmonica"],
+    "classical": ["orchestral", "symphonic", "stately", "ornate", "composed", "refined"],
+    "country": ["twangy", "storytelling", "rural", "banjo", "heartfelt", "dusty"],
+    "disco": ["groovy", "four-on-the-floor", "glittery", "strings", "dancefloor", "retro"],
+    "hiphop": ["rhythmic", "sampled", "spoken-word", "urban", "bassy", "looped"],
+    "jazz": ["improvised", "syncopated", "smoky", "brassy", "swinging", "intricate"],
+    "metal": ["distorted", "heavy", "aggressive", "screaming", "powerful", "intense"],
+    "pop": ["catchy", "polished", "bright", "radio-ready", "hooky", "upbeat"],
+    "reggae": ["offbeat", "laid-back", "island", "skanking", "mellow", "loping"],
+    "rock": ["driving", "electric", "riff-heavy", "energetic", "raw", "anthemic"],
+}
 
 def genre_to_multihot(genre: str) -> np.ndarray:
-    vec = np.zeros(len(GTZAN_GENRES), dtype=np.float32)
-    vec[GTZAN_GENRES.index(genre)] = 1.0
+    vec = np.zeros(len(GTZAN_GENRE_WORDS), dtype=np.float32)
+    vec[list(GTZAN_GENRE_WORDS.keys()).index(genre)] = 1.0
     return vec
 
 
 def genre_to_caption_tokens(genre: str, max_length=32):
-    """GTZAN has no captions/tags text, so we synthesize a one-line
-    description from the genre folder name — good enough to exercise the
-    BERT branch. Swap this for real captions/tags when using
-    MagnaTagATune (tag list) or MusicCaps (caption field)."""
-    words = ["a", "song", "in", "the", genre, "genre"]
+    """GTZAN has no real captions. Instead of stating the genre name
+    directly (which would let the model win by memorizing one token per
+    class — a leakage shortcut, not genuine understanding), we describe
+    the genre's *style* with adjectives, the way a MusicCaps-style caption
+    would. The model has to learn which stylistic words correlate with
+    which genre, from a caption that never says the answer outright."""
+    pool = GTZAN_GENRE_WORDS[genre]
+    chosen = random.sample(pool, k=min(3, len(pool)))
+    words = ["a", "track", "with"] + chosen + ["sound"]
+    random.shuffle(words)
     return tokenize(words, max_length)
 
 
